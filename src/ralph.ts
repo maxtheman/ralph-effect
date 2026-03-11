@@ -7,23 +7,20 @@
  *   3. Evaluate: is the goal met?
  *   4. If not: feed errors/output back, refine, loop
  *   5. Watch the inferencing — you're on the loop, not in the loop
- *
- * This is Option C: the agent USES Codex as one backend AND
- * EXPOSES the Codex JSON-RPC protocol so other clients can drive it.
  */
 import { LanguageModel, Chat } from "@effect/ai"
 import { AnthropicLanguageModel, AnthropicClient } from "@effect/ai-anthropic"
 import { NodeHttpClient } from "@effect/platform-node"
-import { Console, Config, Effect, Layer, Ref } from "effect"
-import { AgentToolkit } from "./tools.js"
+import { Console, Config, Effect, Layer } from "effect"
+import { AgentToolkit, AgentToolkitLive } from "./tools.js"
 
 // ---------------------------------------------------------------------------
 // Ralph loop configuration
 // ---------------------------------------------------------------------------
 interface RalphConfig {
-  goal: string
-  maxIterations: number
-  verbose: boolean
+  readonly goal: string
+  readonly maxIterations: number
+  readonly verbose: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +52,7 @@ Has the goal been fully achieved? Respond with EXACTLY one of:
 // ---------------------------------------------------------------------------
 // The Ralph loop itself
 // ---------------------------------------------------------------------------
-const ralph = (config: RalphConfig) =>
+export const ralph = (config: RalphConfig) =>
   Effect.gen(function* () {
     const chat = yield* Chat.empty
 
@@ -68,9 +65,11 @@ const ralph = (config: RalphConfig) =>
 
     while (iteration < config.maxIterations) {
       iteration++
-      yield* Console.log(`\x1b[95m[ralph]\x1b[0m === Iteration ${iteration}/${config.maxIterations} ===`)
+      yield* Console.log(
+        `\x1b[95m[ralph]\x1b[0m === Iteration ${iteration}/${config.maxIterations} ===`
+      )
 
-      // Run the agent with the current goal + toolkit
+      // Run the agent — inner tool loop is automatic
       const response = yield* chat.generateText({
         prompt: currentGoal,
         toolkit: AgentToolkit
@@ -80,7 +79,7 @@ const ralph = (config: RalphConfig) =>
         yield* Console.log(`\x1b[93m[agent]\x1b[0m ${response.text}`)
       }
 
-      // Evaluate
+      // Evaluate — LLM-as-judge
       yield* Console.log(`\x1b[96m[eval]\x1b[0m Evaluating...`)
       const result = yield* evaluate(config.goal, response.text)
 
@@ -89,9 +88,14 @@ const ralph = (config: RalphConfig) =>
         return { iterations: iteration, result: response.text }
       }
 
-      // Refine — feed the evaluation back as the next goal
+      // Refine — feed evaluation back as next goal
       yield* Console.log(`\x1b[93m[ralph]\x1b[0m Continuing: ${result.reason}`)
-      currentGoal = `Original goal: ${config.goal}\n\nPrevious attempt output:\n${response.text}\n\nWhat still needs to be done: ${result.reason}\n\nPlease continue working on the original goal.`
+      currentGoal = [
+        `Original goal: ${config.goal}`,
+        `\nPrevious attempt output:\n${response.text}`,
+        `\nWhat still needs to be done: ${result.reason}`,
+        `\nPlease continue working on the original goal.`
+      ].join("\n")
     }
 
     yield* Console.log(`\x1b[91m[ralph]\x1b[0m Hit max iterations (${config.maxIterations})`)
@@ -99,7 +103,7 @@ const ralph = (config: RalphConfig) =>
   })
 
 // ---------------------------------------------------------------------------
-// Provider layer
+// Provider layer — swap this one line to change models
 // ---------------------------------------------------------------------------
 const AnthropicModel = AnthropicLanguageModel.model("claude-sonnet-4-20250514")
 
@@ -123,6 +127,7 @@ const main = ralph({
   maxIterations: parseInt(process.argv[3] || "10", 10),
   verbose: process.argv.includes("--verbose")
 }).pipe(
+  Effect.provide(AgentToolkitLive),
   Effect.provide(AnthropicModel),
   Effect.provide(AnthropicLive),
   Effect.catchAll((e) => Console.log(`Ralph failed: ${e}`))
