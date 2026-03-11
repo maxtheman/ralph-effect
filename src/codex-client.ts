@@ -10,7 +10,8 @@
  *   - thread/start → creates a conversation thread
  *   - turn/start   → sends user input, Codex runs full agent loop
  *   - Notifications stream back as turn progresses
- *   - codex/event/turn_completed notification signals the turn is done
+ *   - turn/completed notification signals the turn is done
+ *   - codex/event/agent_message carries the actual response text
  */
 import { Context, Effect, Layer, Console } from "effect"
 import * as childProcess from "node:child_process"
@@ -164,6 +165,13 @@ class CodexTransport {
     this.listeners.set(method, existing)
   }
 
+  /** Unsubscribe a specific handler */
+  off(method: string, handler: (params: Record<string, unknown>) => void): void {
+    const handlers = this.listeners.get(method) ?? []
+    const idx = handlers.indexOf(handler)
+    if (idx >= 0) handlers.splice(idx, 1)
+  }
+
   /** Wait for a specific notification (returns first matching) */
   waitForNotification(
     method: string,
@@ -205,27 +213,25 @@ class CodexTransport {
 }
 
 // ---------------------------------------------------------------------------
-// Extract agent text from turn items
+// Agent message from codex/event/agent_message notification
 // ---------------------------------------------------------------------------
-const extractAgentText = (turn: Turn): string => {
-  const messages = turn.items
-    .filter((item) => item.type === "agentMessage" && item.text)
-    .map((item) => item.text!)
-
-  if (messages.length > 0) return messages.join("\n")
-
-  // Fallback: check for any text in items
-  const anyText = turn.items
-    .filter((item) => item.text)
-    .map((item) => item.text!)
-
-  if (anyText.length > 0) return anyText.join("\n")
-
-  return `[Turn ${turn.status}${turn.error ? `: ${turn.error.message}` : ""}]`
+interface AgentMessageEvent {
+  readonly msg: {
+    readonly type: "agent_message"
+    readonly message: string
+    readonly phase?: string | null
+  }
+  readonly conversationId: string
 }
 
 // ---------------------------------------------------------------------------
 // sendTurnAndWait — core operation: send a turn and wait for completion
+//
+// Protocol reality (discovered via live testing):
+//   1. turn/start returns immediately with status "inProgress"
+//   2. Agent messages stream via codex/event/agent_message notifications
+//   3. turn/completed fires when done — but turn.items is EMPTY
+//   4. So we collect agent_message texts during the turn, then return them
 // ---------------------------------------------------------------------------
 const sendTurnAndWait = (
   transport: CodexTransport,
@@ -233,6 +239,18 @@ const sendTurnAndWait = (
   prompt: string
 ): Effect.Effect<string, Error> =>
   Effect.gen(function* () {
+    // Accumulator for agent messages during this turn
+    const collectedMessages: string[] = []
+
+    // Start collecting agent messages BEFORE sending the turn
+    const messageHandler = (params: Record<string, unknown>) => {
+      const evt = params as unknown as AgentMessageEvent
+      if (evt.conversationId === threadId && evt.msg?.message) {
+        collectedMessages.push(evt.msg.message)
+      }
+    }
+    transport.on("codex/event/agent_message", messageHandler)
+
     // Start the turn
     const turnResponse = (yield* transport.call("turn/start", {
       threadId,
@@ -242,25 +260,32 @@ const sendTurnAndWait = (
 
     const turnId = turnResponse.turn.id
 
-    // If the turn completed synchronously (unlikely but possible)
-    if (turnResponse.turn.status === "completed") {
-      return extractAgentText(turnResponse.turn)
-    }
-
     if (turnResponse.turn.status === "failed") {
+      transport.off("codex/event/agent_message", messageHandler)
       return yield* Effect.fail(
         new Error(turnResponse.turn.error?.message ?? "Turn failed immediately")
       )
     }
 
-    // Wait for turn_completed notification
+    // If somehow completed synchronously
+    if (turnResponse.turn.status === "completed") {
+      transport.off("codex/event/agent_message", messageHandler)
+      return collectedMessages.length > 0
+        ? collectedMessages.join("\n")
+        : `[Turn completed]`
+    }
+
+    // Wait for turn/completed notification (NOT codex/event/turn_completed)
     const notification = yield* transport.waitForNotification(
-      "codex/event/turn_completed",
+      "turn/completed",
       (params) => {
         const turn = params.turn as Turn | undefined
         return turn?.id === turnId
       }
     )
+
+    // Clean up the message listener
+    transport.off("codex/event/agent_message", messageHandler)
 
     const completedTurn = notification.turn as Turn
 
@@ -270,7 +295,12 @@ const sendTurnAndWait = (
       )
     }
 
-    return extractAgentText(completedTurn)
+    // Return collected agent messages (turn.items is empty in the notification)
+    if (collectedMessages.length > 0) {
+      return collectedMessages.join("\n")
+    }
+
+    return `[Turn ${completedTurn.status}]`
   })
 
 // ---------------------------------------------------------------------------
@@ -289,14 +319,24 @@ export const CodexLLMLive: Layer.Layer<CodexLLM, Error> = Layer.effect(
 
     const transport = new CodexTransport(proc)
 
-    // Log item completed notifications for observability
+    // Log agent messages for observability
+    // The actual text comes via codex/event/agent_message (not item_completed)
+    transport.on("codex/event/agent_message", (params) => {
+      const evt = params as unknown as AgentMessageEvent
+      if (evt.msg?.message) {
+        const preview = evt.msg.message.slice(0, 120)
+        console.error(`[codex:msg] ${preview}${evt.msg.message.length > 120 ? "..." : ""}`)
+      }
+    })
+
+    // Log tool executions for observability
     transport.on("codex/event/item_completed", (params) => {
-      const item = params.item as ThreadItem | undefined
-      if (item?.type === "commandExecution") {
-        console.error(`[codex:tool] ${item.command}`)
-      } else if (item?.type === "agentMessage") {
-        const preview = (item.text ?? "").slice(0, 80)
-        console.error(`[codex:msg] ${preview}${(item.text?.length ?? 0) > 80 ? "..." : ""}`)
+      const msg = params.msg as { type: string; item?: Record<string, unknown> } | undefined
+      const item = msg?.item
+      if (!item) return
+      const itemType = (item.type as string)?.toLowerCase() ?? ""
+      if (itemType === "commandexecution" || itemType === "command_execution") {
+        console.error(`[codex:tool] ${item.command ?? item.input ?? ""}`)
       }
     })
 

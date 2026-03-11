@@ -29,24 +29,31 @@ interface RalphConfig {
 const evaluate = (codex: CodexLLM["Type"], goal: string, agentOutput: string) =>
   codex
     .generateText(
-      `You are evaluating whether an AI agent has completed a task.
+      `You are a strict evaluator. Based ONLY on the agent output below, decide if the goal was met.
 
 GOAL: ${goal}
 
 AGENT OUTPUT:
 ${agentOutput}
 
-Has the goal been fully achieved? Respond with EXACTLY one of:
-- "DONE" if the goal is complete
-- "CONTINUE: <what still needs to be done>" if more work is needed
-- "FAILED: <reason>" if the approach is fundamentally broken`
+Do NOT run any tools or verify anything yourself. Just read the output above.
+Your ENTIRE response must be exactly one line — one of:
+DONE
+CONTINUE: <what still needs to be done>
+FAILED: <reason>`
     )
     .pipe(
       Effect.map((text) => {
-        const trimmed = text.trim()
-        if (trimmed.startsWith("DONE")) return { done: true as const, reason: "complete" }
-        if (trimmed.startsWith("FAILED")) return { done: true as const, reason: trimmed }
-        return { done: false as const, reason: trimmed.replace("CONTINUE: ", "") }
+        // Check all lines for verdict — Codex may prepend reasoning
+        const lines = text.trim().split("\n")
+        for (const line of lines) {
+          const l = line.trim()
+          if (l === "DONE" || l.startsWith("DONE")) return { done: true as const, reason: "complete" }
+          if (l.startsWith("FAILED")) return { done: true as const, reason: l }
+          if (l.startsWith("CONTINUE:")) return { done: false as const, reason: l.replace("CONTINUE: ", "") }
+        }
+        // Fallback: treat as continue
+        return { done: false as const, reason: text.trim().slice(0, 200) }
       }),
       Effect.catchAll((e) =>
         Effect.succeed({ done: false as const, reason: `Evaluation error: ${e.message}` })
@@ -131,4 +138,9 @@ const main = ralph({
   Effect.catchAll((e) => Console.log(`Ralph failed: ${e}`))
 )
 
-Effect.runPromise(main).catch(console.error)
+Effect.runPromise(main)
+  .then(() => process.exit(0))
+  .catch((e) => {
+    console.error(e)
+    process.exit(1)
+  })

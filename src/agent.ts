@@ -65,4 +65,9 @@ const main = createRepl.pipe(
   Effect.catchAll((e) => Console.log(`Agent failed: ${e}`))
 )
 
-Effect.runPromise(main).catch(console.error)
+Effect.runPromise(main)
+  .then(() => process.exit(0))
+  .catch((e) => {
+    console.error(e)
+    process.exit(1)
+  })
