@@ -1,23 +1,22 @@
 /**
- * agent.ts — The inner agent: a REPL with automatic tool loop.
+ * agent.ts — The inner agent: a REPL backed by Codex.
  *
- * Geoff's double loop becomes a single loop here because Effect's
- * LanguageModel.generateText with a Toolkit auto-loops tool calls.
- * The inner tool loop is FREE — the framework does it.
+ * The outer loop is a simple REPL (read input → send to Codex → print).
+ * The inner tool loop is handled by Codex itself — it has its own tools
+ * (file read, edit, bash, search) and runs them autonomously.
  *
- * What remains: the outer REPL (read input → generate → print).
+ * No Anthropic key needed. Just `codex login`.
  */
-import { LanguageModel } from "@effect/ai"
-import { AnthropicLanguageModel, AnthropicClient } from "@effect/ai-anthropic"
-import { NodeHttpClient } from "@effect/platform-node"
-import { Console, Config, Effect, Layer } from "effect"
-import { AgentToolkit, AgentToolkitLive } from "./tools.js"
+import { Console, Effect } from "effect"
+import { CodexLLM, CodexLLMLive } from "./codex-client.js"
 import * as readline from "node:readline"
 
 // ---------------------------------------------------------------------------
-// REPL — the outer loop. Inner tool loop handled by framework.
+// REPL — the outer loop. Inner tool loop handled by Codex.
 // ---------------------------------------------------------------------------
 const createRepl = Effect.gen(function* () {
+  const codex = yield* CodexLLM
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -33,7 +32,9 @@ const createRepl = Effect.gen(function* () {
       })
     })
 
-  yield* Console.log("Chat with Claude (use 'ctrl-c' to quit)")
+  // Create a persistent thread for the conversation
+  const threadId = yield* codex.createThread()
+  yield* Console.log(`Chat with Codex (thread: ${threadId}) — use 'ctrl-c' to quit`)
 
   yield* Effect.forever(
     Effect.gen(function* () {
@@ -42,34 +43,26 @@ const createRepl = Effect.gen(function* () {
 
       yield* Console.log("\x1b[96m[thinking...]\x1b[0m")
 
-      const response = yield* LanguageModel.generateText({
-        prompt: input,
-        toolkit: AgentToolkit
-      })
+      const response = yield* codex.sendTurn(threadId, input).pipe(
+        Effect.catchAll((e) => Effect.succeed(`Error: ${e.message}`))
+      )
 
-      yield* Console.log(`\x1b[93mClaude\x1b[0m: ${response.text}`)
+      yield* Console.log(`\x1b[93mCodex\x1b[0m: ${response}`)
     })
-  ).pipe(Effect.catchAll((e) => Console.log(`\nSession ended: ${e}`)))
+  ).pipe(
+    Effect.catchAll((e) => Console.log(`\nSession ended: ${e}`))
+  )
 
+  yield* codex.archiveThread(threadId).pipe(Effect.catchAll(() => Effect.void))
   rl.close()
 })
 
 // ---------------------------------------------------------------------------
-// Provider layer — swap this one line to change models
-// ---------------------------------------------------------------------------
-const AnthropicModel = AnthropicLanguageModel.model("claude-sonnet-4-20250514")
-
-const AnthropicLive = AnthropicClient.layerConfig({
-  apiKey: Config.redacted("ANTHROPIC_API_KEY")
-}).pipe(Layer.provide(NodeHttpClient.layerUndici))
-
-// ---------------------------------------------------------------------------
-// Run — provide model, provider HTTP, and tool handlers
+// Run — provide Codex backend
 // ---------------------------------------------------------------------------
 const main = createRepl.pipe(
-  Effect.provide(AgentToolkitLive),
-  Effect.provide(AnthropicModel),
-  Effect.provide(AnthropicLive)
+  Effect.provide(CodexLLMLive),
+  Effect.catchAll((e) => Console.log(`Agent failed: ${e}`))
 )
 
 Effect.runPromise(main).catch(console.error)

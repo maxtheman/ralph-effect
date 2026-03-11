@@ -7,13 +7,14 @@
  *   - Turn (user request → agent work)
  *   - Item (individual tool calls, file changes, messages)
  *
- * This is the "product is the IDE" half of Option C.
+ * This makes ralph-effect act AS a Codex server, so IDEs and other
+ * clients can connect to it. Internally delegates to the Codex backend
+ * for LLM processing.
+ *
+ * No Anthropic key needed. Just `codex login`.
  */
-import { LanguageModel } from "@effect/ai"
-import { AnthropicLanguageModel, AnthropicClient } from "@effect/ai-anthropic"
-import { NodeHttpClient } from "@effect/platform-node"
-import { Console, Config, Effect, Layer } from "effect"
-import { AgentToolkit, AgentToolkitLive } from "./tools.js"
+import { Console, Effect } from "effect"
+import { CodexLLM, CodexLLMLive } from "./codex-client.js"
 import * as readline from "node:readline"
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,7 @@ interface JsonRpcNotification {
 // ---------------------------------------------------------------------------
 interface ThreadState {
   readonly id: string
+  readonly codexThreadId: string // The underlying Codex thread
   readonly turns: string[]
   readonly createdAt: string
   archived: boolean
@@ -87,10 +89,11 @@ const send = (msg: JsonRpcResponse | JsonRpcNotification): void => {
 }
 
 // ---------------------------------------------------------------------------
-// Method handler — uses LanguageModel.generateText directly (stateless turns)
+// Method handler — delegates to Codex backend
 // ---------------------------------------------------------------------------
 const handleMethod = (req: JsonRpcRequest) =>
   Effect.gen(function* () {
+    const codex = yield* CodexLLM
     const { method, params, id } = req
 
     if (!initialized && method !== "initialize") {
@@ -118,15 +121,21 @@ const handleMethod = (req: JsonRpcRequest) =>
       }
 
       case "thread/start": {
-        const threadId = `thread_${++threadCounter}`
-        threads.set(threadId, {
-          id: threadId,
+        const localId = `thread_${++threadCounter}`
+        // Create a real Codex thread as the backend
+        const codexThreadId = yield* codex.createThread().pipe(
+          Effect.catchAll(() => Effect.succeed(`local_${localId}`))
+        )
+
+        threads.set(localId, {
+          id: localId,
+          codexThreadId,
           turns: [],
           createdAt: new Date().toISOString(),
           archived: false
         })
-        send(notify("thread/status/changed", { threadId, status: "active" }))
-        if (id != null) send(respond(id, { threadId }))
+        send(notify("thread/status/changed", { threadId: localId, status: "active" }))
+        if (id != null) send(respond(id, { threadId: localId }))
         break
       }
 
@@ -143,6 +152,9 @@ const handleMethod = (req: JsonRpcRequest) =>
         const thread = threads.get(threadId)
         if (thread) {
           thread.archived = true
+          yield* codex.archiveThread(thread.codexThreadId).pipe(
+            Effect.catchAll(() => Effect.void)
+          )
           send(notify("thread/status/changed", { threadId, status: "archived" }))
         }
         if (id != null) send(respond(id, { success: !!thread }))
@@ -163,19 +175,16 @@ const handleMethod = (req: JsonRpcRequest) =>
         thread.turns.push(turnId)
         send(notify("turn/started", { threadId, turnId }))
 
-        // Run agent — LanguageModel.generateText with toolkit
-        const response = yield* LanguageModel.generateText({
-          prompt,
-          toolkit: AgentToolkit
-        }).pipe(
-          Effect.catchAll((e) => Effect.succeed({ text: `Error: ${e}` } as { text: string }))
+        // Delegate to Codex backend
+        const response = yield* codex.sendTurn(thread.codexThreadId, prompt).pipe(
+          Effect.catchAll((e) => Effect.succeed(`Error: ${e.message}`))
         )
 
         send(notify("item/started", { turnId, type: "message" }))
-        send(notify("item/completed", { turnId, type: "message", content: response.text }))
+        send(notify("item/completed", { turnId, type: "message", content: response }))
         send(notify("turn/completed", { threadId, turnId }))
 
-        if (id != null) send(respond(id, { turnId, text: response.text }))
+        if (id != null) send(respond(id, { turnId, text: response }))
         break
       }
 
@@ -189,7 +198,7 @@ const handleMethod = (req: JsonRpcRequest) =>
           send(
             respond(id, {
               models: [
-                { id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4", provider: "anthropic" }
+                { id: "codex-default", name: "Codex Default Model", provider: "openai" }
               ]
             })
           )
@@ -221,19 +230,6 @@ const handleMethod = (req: JsonRpcRequest) =>
   })
 
 // ---------------------------------------------------------------------------
-// Provider layer
-// ---------------------------------------------------------------------------
-const AnthropicModel = AnthropicLanguageModel.model("claude-sonnet-4-20250514")
-
-const AnthropicLive = AnthropicClient.layerConfig({
-  apiKey: Config.redacted("ANTHROPIC_API_KEY")
-}).pipe(Layer.provide(NodeHttpClient.layerUndici))
-
-// AnthropicModel needs AnthropicClient, which AnthropicLive provides
-const ModelWithClient = AnthropicModel.pipe(Layer.provide(AnthropicLive))
-const FullLayer = Layer.mergeAll(AgentToolkitLive, ModelWithClient)
-
-// ---------------------------------------------------------------------------
 // stdio transport — newline-delimited JSON-RPC
 // ---------------------------------------------------------------------------
 const server = Effect.gen(function* () {
@@ -245,7 +241,7 @@ const server = Effect.gen(function* () {
     rl.on("line", (line) => {
       try {
         const req = JSON.parse(line) as JsonRpcRequest
-        Effect.runPromise(handleMethod(req).pipe(Effect.provide(FullLayer))).catch((e) => {
+        Effect.runPromise(handleMethod(req).pipe(Effect.provide(CodexLLMLive))).catch((e) => {
           if (req.id != null) {
             send(respondError(req.id, -32603, `Internal error: ${e}`))
           }

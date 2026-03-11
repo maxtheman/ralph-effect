@@ -1,18 +1,17 @@
 /**
- * ralph.ts — The Ralph Wiggum Loop in Effect.ts
+ * ralph.ts — The Ralph Wiggum Loop backed by Codex.
  *
  * The huntley pattern:
  *   1. Give the agent a goal
- *   2. Agent runs autonomously (tool loop is automatic via Effect)
- *   3. Evaluate: is the goal met?
+ *   2. Agent runs autonomously (Codex handles tool loop)
+ *   3. Evaluate: is the goal met? (uses Codex as the judge)
  *   4. If not: feed errors/output back, refine, loop
  *   5. Watch the inferencing — you're on the loop, not in the loop
+ *
+ * No Anthropic key needed. Just `codex login`.
  */
-import { LanguageModel, Chat } from "@effect/ai"
-import { AnthropicLanguageModel, AnthropicClient } from "@effect/ai-anthropic"
-import { NodeHttpClient } from "@effect/platform-node"
-import { Console, Config, Effect, Layer } from "effect"
-import { AgentToolkit, AgentToolkitLive } from "./tools.js"
+import { Console, Effect } from "effect"
+import { CodexLLM, CodexLLMLive } from "./codex-client.js"
 
 // ---------------------------------------------------------------------------
 // Ralph loop configuration
@@ -25,11 +24,12 @@ interface RalphConfig {
 
 // ---------------------------------------------------------------------------
 // The evaluation step — did the agent achieve the goal?
-// Uses the LLM itself as the judge (recursive, very huntley)
+// Uses Codex itself as the judge (recursive, very huntley)
 // ---------------------------------------------------------------------------
-const evaluate = (goal: string, agentOutput: string) =>
-  LanguageModel.generateText({
-    prompt: `You are evaluating whether an AI agent has completed a task.
+const evaluate = (codex: CodexLLM["Type"], goal: string, agentOutput: string) =>
+  codex
+    .generateText(
+      `You are evaluating whether an AI agent has completed a task.
 
 GOAL: ${goal}
 
@@ -40,25 +40,33 @@ Has the goal been fully achieved? Respond with EXACTLY one of:
 - "DONE" if the goal is complete
 - "CONTINUE: <what still needs to be done>" if more work is needed
 - "FAILED: <reason>" if the approach is fundamentally broken`
-  }).pipe(
-    Effect.map((response) => {
-      const text = response.text.trim()
-      if (text.startsWith("DONE")) return { done: true as const, reason: "complete" }
-      if (text.startsWith("FAILED")) return { done: true as const, reason: text }
-      return { done: false as const, reason: text.replace("CONTINUE: ", "") }
-    })
-  )
+    )
+    .pipe(
+      Effect.map((text) => {
+        const trimmed = text.trim()
+        if (trimmed.startsWith("DONE")) return { done: true as const, reason: "complete" }
+        if (trimmed.startsWith("FAILED")) return { done: true as const, reason: trimmed }
+        return { done: false as const, reason: trimmed.replace("CONTINUE: ", "") }
+      }),
+      Effect.catchAll((e) =>
+        Effect.succeed({ done: false as const, reason: `Evaluation error: ${e.message}` })
+      )
+    )
 
 // ---------------------------------------------------------------------------
 // The Ralph loop itself
 // ---------------------------------------------------------------------------
 export const ralph = (config: RalphConfig) =>
   Effect.gen(function* () {
-    const chat = yield* Chat.empty
+    const codex = yield* CodexLLM
 
     yield* Console.log(`\x1b[95m[ralph]\x1b[0m Goal: ${config.goal}`)
     yield* Console.log(`\x1b[95m[ralph]\x1b[0m Max iterations: ${config.maxIterations}`)
     yield* Console.log("")
+
+    // Create a persistent thread for the agent work
+    const agentThreadId = yield* codex.createThread()
+    yield* Console.log(`\x1b[95m[ralph]\x1b[0m Agent thread: ${agentThreadId}`)
 
     let currentGoal = config.goal
     let iteration = 0
@@ -69,47 +77,39 @@ export const ralph = (config: RalphConfig) =>
         `\x1b[95m[ralph]\x1b[0m === Iteration ${iteration}/${config.maxIterations} ===`
       )
 
-      // Run the agent — inner tool loop is automatic
-      const response = yield* chat.generateText({
-        prompt: currentGoal,
-        toolkit: AgentToolkit
-      })
+      // Run the agent — Codex handles the full tool loop internally
+      const response = yield* codex.sendTurn(agentThreadId, currentGoal).pipe(
+        Effect.catchAll((e) => Effect.succeed(`Error: ${e.message}`))
+      )
 
       if (config.verbose) {
-        yield* Console.log(`\x1b[93m[agent]\x1b[0m ${response.text}`)
+        yield* Console.log(`\x1b[93m[agent]\x1b[0m ${response}`)
       }
 
-      // Evaluate — LLM-as-judge
+      // Evaluate — Codex-as-judge (uses ephemeral thread via generateText)
       yield* Console.log(`\x1b[96m[eval]\x1b[0m Evaluating...`)
-      const result = yield* evaluate(config.goal, response.text)
+      const result = yield* evaluate(codex, config.goal, response)
 
       if (result.done) {
         yield* Console.log(`\x1b[92m[ralph]\x1b[0m ${result.reason}`)
-        return { iterations: iteration, result: response.text }
+        yield* codex.archiveThread(agentThreadId).pipe(Effect.catchAll(() => Effect.void))
+        return { iterations: iteration, result: response }
       }
 
       // Refine — feed evaluation back as next goal
       yield* Console.log(`\x1b[93m[ralph]\x1b[0m Continuing: ${result.reason}`)
       currentGoal = [
         `Original goal: ${config.goal}`,
-        `\nPrevious attempt output:\n${response.text}`,
+        `\nPrevious attempt output:\n${response}`,
         `\nWhat still needs to be done: ${result.reason}`,
         `\nPlease continue working on the original goal.`
       ].join("\n")
     }
 
     yield* Console.log(`\x1b[91m[ralph]\x1b[0m Hit max iterations (${config.maxIterations})`)
+    yield* codex.archiveThread(agentThreadId).pipe(Effect.catchAll(() => Effect.void))
     return { iterations: iteration, result: "max iterations reached" }
   })
-
-// ---------------------------------------------------------------------------
-// Provider layer — swap this one line to change models
-// ---------------------------------------------------------------------------
-const AnthropicModel = AnthropicLanguageModel.model("claude-sonnet-4-20250514")
-
-const AnthropicLive = AnthropicClient.layerConfig({
-  apiKey: Config.redacted("ANTHROPIC_API_KEY")
-}).pipe(Layer.provide(NodeHttpClient.layerUndici))
 
 // ---------------------------------------------------------------------------
 // CLI entry point
@@ -127,9 +127,7 @@ const main = ralph({
   maxIterations: parseInt(process.argv[3] || "10", 10),
   verbose: process.argv.includes("--verbose")
 }).pipe(
-  Effect.provide(AgentToolkitLive),
-  Effect.provide(AnthropicModel),
-  Effect.provide(AnthropicLive),
+  Effect.provide(CodexLLMLive),
   Effect.catchAll((e) => Console.log(`Ralph failed: ${e}`))
 )
 
