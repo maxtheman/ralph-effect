@@ -8,18 +8,23 @@
  *   4. If not: feed errors/output back, refine, loop
  *   5. Watch the inferencing — you're on the loop, not in the loop
  *
+ * Orchestrator-aware: accepts optional {queue, stateRef} handles.
+ * Without handles → standalone mode (original behavior).
+ * With handles → drains queue between iterations, updates state ref.
+ *
  * No Anthropic key needed. Just `codex login`.
  */
-import { Console, Effect } from "effect"
+import { Console, Effect, Queue, SubscriptionRef, Ref } from "effect"
 import { CodexLLM, CodexLLMLive } from "./codex-client.js"
+import type { LoopConfig, LoopMessage, LoopState } from "./loop-types.js"
+import { LoopMessage as LM } from "./loop-types.js"
 
 // ---------------------------------------------------------------------------
-// Ralph loop configuration
+// Orchestrator handles — injected by orchestrator, optional for standalone
 // ---------------------------------------------------------------------------
-interface RalphConfig {
-  readonly goal: string
-  readonly maxIterations: number
-  readonly verbose: boolean
+export interface LoopHandles {
+  readonly queue: Queue.Queue<LoopMessage>
+  readonly stateRef: SubscriptionRef.SubscriptionRef<LoopState>
 }
 
 // ---------------------------------------------------------------------------
@@ -61,30 +66,102 @@ FAILED: <reason>`
     )
 
 // ---------------------------------------------------------------------------
-// The Ralph loop itself
+// Drain messages from queue, apply to mutable refs
 // ---------------------------------------------------------------------------
-export const ralph = (config: RalphConfig) =>
+const drainMessages = (
+  queue: Queue.Queue<LoopMessage>,
+  goalRef: Ref.Ref<string>,
+  maxIterRef: Ref.Ref<number>,
+  pausedRef: Ref.Ref<boolean>
+) =>
+  Effect.gen(function* () {
+    const messages = yield* Queue.takeAll(queue)
+    for (const msg of messages) {
+      switch (msg._tag) {
+        case "UserMessage":
+          yield* Ref.update(goalRef, (g) => `${g}\n\nAdditional user instruction: ${msg.text}`)
+          break
+        case "SetGoal":
+          yield* Ref.set(goalRef, msg.goal)
+          break
+        case "Pause":
+          yield* Ref.set(pausedRef, true)
+          break
+        case "Resume":
+          yield* Ref.set(pausedRef, false)
+          break
+        case "SetMaxIterations":
+          yield* Ref.set(maxIterRef, msg.max)
+          break
+      }
+    }
+  })
+
+// ---------------------------------------------------------------------------
+// The Ralph loop itself — orchestrator-aware
+// ---------------------------------------------------------------------------
+export const ralph = (config: LoopConfig, handles?: LoopHandles) =>
   Effect.gen(function* () {
     const codex = yield* CodexLLM
+    const tag = `[ralph:${config.id}]`
 
-    yield* Console.log(`\x1b[95m[ralph]\x1b[0m Goal: ${config.goal}`)
-    yield* Console.log(`\x1b[95m[ralph]\x1b[0m Max iterations: ${config.maxIterations}`)
+    // Internal mutable refs
+    const goalRef = yield* Ref.make(config.goal)
+    const maxIterRef = yield* Ref.make(config.maxIterations)
+    const pausedRef = yield* Ref.make(false)
+
+    // If no handles provided (standalone mode), create a dummy queue
+    const queue = handles?.queue ?? (yield* Queue.unbounded<LoopMessage>())
+
+    // Helper to update orchestrator state ref (no-op in standalone)
+    const updateState = (patch: Partial<LoopState>) =>
+      handles?.stateRef
+        ? SubscriptionRef.update(handles.stateRef, (s) => ({
+            ...s,
+            ...patch,
+            updatedAt: Date.now()
+          }))
+        : Effect.void
+
+    yield* Console.log(`\x1b[95m${tag}\x1b[0m Goal: ${config.goal}`)
+    yield* Console.log(`\x1b[95m${tag}\x1b[0m Max iterations: ${config.maxIterations}`)
     yield* Console.log("")
 
     // Create a persistent thread for the agent work
     const agentThreadId = yield* codex.createThread()
-    yield* Console.log(`\x1b[95m[ralph]\x1b[0m Agent thread: ${agentThreadId}`)
+    yield* Console.log(`\x1b[95m${tag}\x1b[0m Agent thread: ${agentThreadId}`)
 
-    let currentGoal = config.goal
     let iteration = 0
 
-    while (iteration < config.maxIterations) {
-      iteration++
-      yield* Console.log(
-        `\x1b[95m[ralph]\x1b[0m === Iteration ${iteration}/${config.maxIterations} ===`
-      )
+    while (true) {
+      const currentMax = yield* Ref.get(maxIterRef)
+      if (iteration >= currentMax) break
 
-      // Run the agent — Codex handles the full tool loop internally
+      // --- Drain message queue (non-blocking) ---
+      yield* drainMessages(queue, goalRef, maxIterRef, pausedRef)
+
+      // --- Check if paused ---
+      const isPaused = yield* Ref.get(pausedRef)
+      if (isPaused) {
+        yield* Console.log(`\x1b[93m${tag}\x1b[0m Paused — waiting for resume...`)
+        yield* updateState({ status: "paused" })
+        // Poll queue until Resume arrives (fiber-interruptible via Effect.sleep)
+        while (yield* Ref.get(pausedRef)) {
+          yield* Effect.sleep("500 millis")
+          yield* drainMessages(queue, goalRef, maxIterRef, pausedRef)
+        }
+        yield* Console.log(`\x1b[92m${tag}\x1b[0m Resumed`)
+        yield* updateState({ status: "running" })
+      }
+
+      iteration++
+      const currentGoal = yield* Ref.get(goalRef)
+      yield* Console.log(
+        `\x1b[95m${tag}\x1b[0m === Iteration ${iteration}/${yield* Ref.get(maxIterRef)} ===`
+      )
+      yield* updateState({ iteration, status: "running" })
+
+      // --- Agent turn ---
       const response = yield* codex.sendTurn(agentThreadId, currentGoal).pipe(
         Effect.catchAll((e) => Effect.succeed(`Error: ${e.message}`))
       )
@@ -92,55 +169,66 @@ export const ralph = (config: RalphConfig) =>
       if (config.verbose) {
         yield* Console.log(`\x1b[93m[agent]\x1b[0m ${response}`)
       }
+      yield* updateState({ lastAgentOutput: response.slice(0, 500) })
 
-      // Evaluate — Codex-as-judge (uses ephemeral thread via generateText)
+      // --- Evaluate ---
       yield* Console.log(`\x1b[96m[eval]\x1b[0m Evaluating...`)
       const result = yield* evaluate(codex, config.goal, response)
+      yield* updateState({ lastEvalResult: result.reason })
 
       if (result.done) {
-        yield* Console.log(`\x1b[92m[ralph]\x1b[0m ${result.reason}`)
+        yield* Console.log(`\x1b[92m${tag}\x1b[0m ${result.reason}`)
+        yield* updateState({ status: "done" })
         yield* codex.archiveThread(agentThreadId).pipe(Effect.catchAll(() => Effect.void))
         return { iterations: iteration, result: response }
       }
 
-      // Refine — feed evaluation back as next goal
-      yield* Console.log(`\x1b[93m[ralph]\x1b[0m Continuing: ${result.reason}`)
-      currentGoal = [
+      // --- Refine ---
+      yield* Console.log(`\x1b[93m${tag}\x1b[0m Continuing: ${result.reason}`)
+      yield* Ref.set(goalRef, [
         `Original goal: ${config.goal}`,
         `\nPrevious attempt output:\n${response}`,
         `\nWhat still needs to be done: ${result.reason}`,
         `\nPlease continue working on the original goal.`
-      ].join("\n")
+      ].join("\n"))
     }
 
-    yield* Console.log(`\x1b[91m[ralph]\x1b[0m Hit max iterations (${config.maxIterations})`)
+    yield* Console.log(`\x1b[91m${tag}\x1b[0m Hit max iterations (${yield* Ref.get(maxIterRef)})`)
+    yield* updateState({ status: "done" })
     yield* codex.archiveThread(agentThreadId).pipe(Effect.catchAll(() => Effect.void))
     return { iterations: iteration, result: "max iterations reached" }
   })
 
 // ---------------------------------------------------------------------------
-// CLI entry point
+// CLI entry point (standalone mode) — only runs when this file is the entry
 // ---------------------------------------------------------------------------
-const goal = process.argv[2]
+const isMainModule = process.argv[1]?.includes("ralph")
+  && !process.argv[1]?.includes("repl")
+  && !process.argv[1]?.includes("orch")
 
-if (!goal) {
-  console.log("Usage: npx tsx src/ralph.ts <goal>")
-  console.log('Example: npx tsx src/ralph.ts "create a fizzbuzz.js file and verify it works"')
-  process.exit(1)
-}
+if (isMainModule) {
+  const goal = process.argv[2]
 
-const main = ralph({
-  goal,
-  maxIterations: parseInt(process.argv[3] || "10", 10),
-  verbose: process.argv.includes("--verbose")
-}).pipe(
-  Effect.provide(CodexLLMLive),
-  Effect.catchAll((e) => Console.log(`Ralph failed: ${e}`))
-)
-
-Effect.runPromise(main)
-  .then(() => process.exit(0))
-  .catch((e) => {
-    console.error(e)
+  if (!goal) {
+    console.log("Usage: npx tsx src/ralph.ts <goal>")
+    console.log('Example: npx tsx src/ralph.ts "create a fizzbuzz.js file and verify it works"')
     process.exit(1)
-  })
+  }
+
+  const main = ralph({
+    id: "cli",
+    goal,
+    maxIterations: parseInt(process.argv[3] || "10", 10),
+    verbose: process.argv.includes("--verbose")
+  }).pipe(
+    Effect.provide(CodexLLMLive),
+    Effect.catchAll((e) => Console.log(`Ralph failed: ${e}`))
+  )
+
+  Effect.runPromise(main)
+    .then(() => process.exit(0))
+    .catch((e) => {
+      console.error(e)
+      process.exit(1)
+    })
+}

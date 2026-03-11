@@ -6,6 +6,7 @@
   "scripts": {
     "ralph": "tsx src/ralph.ts",
     "agent": "tsx src/agent.ts",
+    "orch": "tsx src/repl.ts",
     "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
