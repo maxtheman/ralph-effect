@@ -8,16 +8,30 @@
  *   4. If not: feed errors/output back, refine, loop
  *   5. Watch the inferencing — you're on the loop, not in the loop
  *
- * Orchestrator-aware: accepts optional {queue, stateRef} handles.
+ * Orchestrator-aware: accepts optional {queue, stateRef, eventBus} handles.
  * Without handles → standalone mode (original behavior).
  * With handles → drains queue between iterations, updates state ref.
  *
+ * Phase 1: Separated context model.
+ *   - goalRef: clean goal string (never polluted by injected context)
+ *   - contextRef: sliding window of ContextItem objects
+ *   - Agent turns compose multi-item input: [goal, ...contextItems]
+ *   - Evaluator sees ONLY the goal — never injected context
+ *   - Custom evaluators override default LLM-as-judge
+ *
  * No Anthropic key needed. Just `codex login`.
  */
-import { Console, Effect, Queue, SubscriptionRef, Ref } from "effect"
+import { Console, Effect, Queue, SubscriptionRef, PubSub, Ref } from "effect"
 import { CodexLLM, CodexLLMLive } from "./codex-client.js"
-import type { LoopConfig, LoopMessage, LoopState } from "./loop-types.js"
-import { LoopMessage as LM } from "./loop-types.js"
+import type {
+  LoopConfig,
+  LoopMessage,
+  LoopState,
+  LoopEvent,
+  ContextItem,
+  EvalResult
+} from "./loop-types.js"
+import { LoopMessage as LM, LoopEvent as LE } from "./loop-types.js"
 
 // ---------------------------------------------------------------------------
 // Orchestrator handles — injected by orchestrator, optional for standalone
@@ -25,13 +39,18 @@ import { LoopMessage as LM } from "./loop-types.js"
 export interface LoopHandles {
   readonly queue: Queue.Queue<LoopMessage>
   readonly stateRef: SubscriptionRef.SubscriptionRef<LoopState>
+  readonly eventBus: PubSub.PubSub<LoopEvent>
 }
 
 // ---------------------------------------------------------------------------
 // The evaluation step — did the agent achieve the goal?
 // Uses Codex itself as the judge (recursive, very huntley)
 // ---------------------------------------------------------------------------
-const evaluate = (codex: CodexLLM["Type"], goal: string, agentOutput: string) =>
+const defaultEvaluate = (
+  codex: CodexLLM["Type"],
+  goal: string,
+  agentOutput: string
+): Effect.Effect<EvalResult, Error> =>
   codex
     .generateText(
       `You are a strict evaluator. Based ONLY on the agent output below, decide if the goal was met.
@@ -53,26 +72,29 @@ FAILED: <reason>`
         const lines = text.trim().split("\n")
         for (const line of lines) {
           const l = line.trim()
-          if (l === "DONE" || l.startsWith("DONE")) return { done: true as const, reason: "complete" }
-          if (l.startsWith("FAILED")) return { done: true as const, reason: l }
-          if (l.startsWith("CONTINUE:")) return { done: false as const, reason: l.replace("CONTINUE: ", "") }
+          if (l === "DONE" || l.startsWith("DONE")) return { done: true, reason: "complete" }
+          if (l.startsWith("FAILED")) return { done: false, reason: l }
+          if (l.startsWith("CONTINUE:")) return { done: false, reason: l.replace("CONTINUE: ", "") }
         }
         // Fallback: treat as continue
-        return { done: false as const, reason: text.trim().slice(0, 200) }
+        return { done: false, reason: text.trim().slice(0, 200) }
       }),
       Effect.catchAll((e) =>
-        Effect.succeed({ done: false as const, reason: `Evaluation error: ${e.message}` })
+        Effect.succeed({ done: false, reason: `Evaluation error: ${e.message}` })
       )
     )
 
 // ---------------------------------------------------------------------------
 // Drain messages from queue, apply to mutable refs
+// Phase 1: InjectContext populates contextRef (NOT goalRef)
 // ---------------------------------------------------------------------------
 const drainMessages = (
   queue: Queue.Queue<LoopMessage>,
   goalRef: Ref.Ref<string>,
   maxIterRef: Ref.Ref<number>,
-  pausedRef: Ref.Ref<boolean>
+  pausedRef: Ref.Ref<boolean>,
+  contextRef: Ref.Ref<ReadonlyArray<ContextItem>>,
+  maxContextItems: number
 ) =>
   Effect.gen(function* () {
     const messages = yield* Queue.takeAll(queue)
@@ -93,9 +115,39 @@ const drainMessages = (
         case "SetMaxIterations":
           yield* Ref.set(maxIterRef, msg.max)
           break
+        case "InjectContext":
+          // Phase 1: populate contextRef with sliding window
+          yield* Ref.update(contextRef, (items) => {
+            const next = [...items, msg.item]
+            return next.length > maxContextItems ? next.slice(-maxContextItems) : next
+          })
+          break
+        case "ClearContext":
+          yield* Ref.set(contextRef, [])
+          break
       }
     }
   })
+
+// ---------------------------------------------------------------------------
+// Compose multi-item input for a turn: goal + context items
+// ---------------------------------------------------------------------------
+const composeInput = (
+  goal: string,
+  context: ReadonlyArray<ContextItem>
+): ReadonlyArray<{ type: "text"; text: string }> => {
+  const items: Array<{ type: "text"; text: string }> = [
+    { type: "text", text: goal }
+  ]
+  for (const ctx of context) {
+    const label = ctx.tag ? ` (${ctx.tag})` : ""
+    items.push({
+      type: "text",
+      text: `[Context from ${ctx.source}${label}]: ${ctx.text}`
+    })
+  }
+  return items
+}
 
 // ---------------------------------------------------------------------------
 // The Ralph loop itself — orchestrator-aware
@@ -104,9 +156,11 @@ export const ralph = (config: LoopConfig, handles?: LoopHandles) =>
   Effect.gen(function* () {
     const codex = yield* CodexLLM
     const tag = `[ralph:${config.id}]`
+    const maxCtx = config.maxContextItems ?? 5
 
-    // Internal mutable refs
+    // Internal mutable refs — goal and context are SEPARATE
     const goalRef = yield* Ref.make(config.goal)
+    const contextRef = yield* Ref.make<ReadonlyArray<ContextItem>>([])
     const maxIterRef = yield* Ref.make(config.maxIterations)
     const pausedRef = yield* Ref.make(false)
 
@@ -123,13 +177,28 @@ export const ralph = (config: LoopConfig, handles?: LoopHandles) =>
           }))
         : Effect.void
 
+    // Helper to publish lifecycle events (no-op in standalone)
+    const publishEvent = (event: LoopEvent) =>
+      handles?.eventBus
+        ? PubSub.publish(handles.eventBus, event)
+        : Effect.void
+
+    // Resolve evaluator: custom or default LLM-as-judge
+    const evaluate = config.evaluator
+      ? config.evaluator
+      : (goal: string, output: string) => defaultEvaluate(codex, goal, output)
+
     yield* Console.log(`\x1b[95m${tag}\x1b[0m Goal: ${config.goal}`)
     yield* Console.log(`\x1b[95m${tag}\x1b[0m Max iterations: ${config.maxIterations}`)
+    if (config.agent?.personality) {
+      yield* Console.log(`\x1b[95m${tag}\x1b[0m Personality: ${config.agent.personality.slice(0, 60)}...`)
+    }
     yield* Console.log("")
 
-    // Create a persistent thread for the agent work
-    const agentThreadId = yield* codex.createThread()
+    // Create a persistent thread for the agent work (with agent config)
+    const agentThreadId = yield* codex.createThread(config.agent)
     yield* Console.log(`\x1b[95m${tag}\x1b[0m Agent thread: ${agentThreadId}`)
+    yield* updateState({ threadId: agentThreadId })
 
     let iteration = 0
 
@@ -138,7 +207,7 @@ export const ralph = (config: LoopConfig, handles?: LoopHandles) =>
       if (iteration >= currentMax) break
 
       // --- Drain message queue (non-blocking) ---
-      yield* drainMessages(queue, goalRef, maxIterRef, pausedRef)
+      yield* drainMessages(queue, goalRef, maxIterRef, pausedRef, contextRef, maxCtx)
 
       // --- Check if paused ---
       const isPaused = yield* Ref.get(pausedRef)
@@ -148,7 +217,7 @@ export const ralph = (config: LoopConfig, handles?: LoopHandles) =>
         // Poll queue until Resume arrives (fiber-interruptible via Effect.sleep)
         while (yield* Ref.get(pausedRef)) {
           yield* Effect.sleep("500 millis")
-          yield* drainMessages(queue, goalRef, maxIterRef, pausedRef)
+          yield* drainMessages(queue, goalRef, maxIterRef, pausedRef, contextRef, maxCtx)
         }
         yield* Console.log(`\x1b[92m${tag}\x1b[0m Resumed`)
         yield* updateState({ status: "running" })
@@ -156,25 +225,45 @@ export const ralph = (config: LoopConfig, handles?: LoopHandles) =>
 
       iteration++
       const currentGoal = yield* Ref.get(goalRef)
+      const currentContext = yield* Ref.get(contextRef)
       yield* Console.log(
         `\x1b[95m${tag}\x1b[0m === Iteration ${iteration}/${yield* Ref.get(maxIterRef)} ===`
       )
-      yield* updateState({ iteration, status: "running" })
+      if (currentContext.length > 0) {
+        yield* Console.log(
+          `\x1b[90m${tag}\x1b[0m  Context items: ${currentContext.length} (from: ${currentContext.map((c) => c.source).join(", ")})`
+        )
+      }
+      yield* updateState({ iteration, status: "running", goal: currentGoal, context: currentContext })
 
-      // --- Agent turn ---
-      const response = yield* codex.sendTurn(agentThreadId, currentGoal).pipe(
+      // --- Agent turn: compose multi-item input (goal + context as separate items) ---
+      const input = composeInput(currentGoal, currentContext)
+      const response = yield* codex.sendTurn(agentThreadId, input).pipe(
         Effect.catchAll((e) => Effect.succeed(`Error: ${e.message}`))
       )
 
       if (config.verbose) {
         yield* Console.log(`\x1b[93m[agent]\x1b[0m ${response}`)
       }
-      yield* updateState({ lastAgentOutput: response.slice(0, 500) })
+      yield* updateState({ lastAgentOutput: response })
 
-      // --- Evaluate ---
+      // --- Clear context after use (it was delivered to the agent this turn) ---
+      yield* Ref.set(contextRef, [])
+      yield* updateState({ context: [] })
+
+      // --- Evaluate (uses currentGoal ONLY — evaluator never sees injected context) ---
       yield* Console.log(`\x1b[96m[eval]\x1b[0m Evaluating...`)
-      const result = yield* evaluate(codex, config.goal, response)
+      const result = yield* evaluate(currentGoal, response)
       yield* updateState({ lastEvalResult: result.reason })
+
+      // --- Publish IterationComplete event ---
+      yield* publishEvent(
+        LE.IterationComplete({
+          id: config.id,
+          iteration,
+          evalResult: result.reason
+        })
+      )
 
       if (result.done) {
         yield* Console.log(`\x1b[92m${tag}\x1b[0m ${result.reason}`)
@@ -202,9 +291,9 @@ export const ralph = (config: LoopConfig, handles?: LoopHandles) =>
 // ---------------------------------------------------------------------------
 // CLI entry point (standalone mode) — only runs when this file is the entry
 // ---------------------------------------------------------------------------
-const isMainModule = process.argv[1]?.includes("ralph")
-  && !process.argv[1]?.includes("repl")
-  && !process.argv[1]?.includes("orch")
+// Check if THIS file is the entry point (not just a directory containing "ralph")
+const entryFile = process.argv[1]?.split("/").pop() ?? ""
+const isMainModule = (entryFile === "ralph.ts" || entryFile === "ralph.js")
 
 if (isMainModule) {
   const goal = process.argv[2]

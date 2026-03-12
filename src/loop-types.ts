@@ -4,7 +4,7 @@
  * Vocabulary: LoopState, LoopMessage, LoopEvent, LoopConfig.
  * Zero logic, zero dependencies beyond `effect`.
  */
-import { Data } from "effect"
+import { Data, Effect } from "effect"
 
 // ---------------------------------------------------------------------------
 // Loop identity
@@ -14,7 +14,50 @@ export type LoopId = string
 // ---------------------------------------------------------------------------
 // Loop status
 // ---------------------------------------------------------------------------
-export type LoopStatus = "running" | "paused" | "done" | "failed" | "interrupted"
+export type LoopStatus = "waiting" | "running" | "paused" | "done" | "failed" | "interrupted"
+
+// ---------------------------------------------------------------------------
+// Context item — structured injected context with provenance
+// ---------------------------------------------------------------------------
+export interface ContextItem {
+  readonly source: LoopId | "user" | "system"
+  readonly timestamp: number
+  readonly text: string
+  /** Optional semantic label, e.g., "critique", "code-review", "notification" */
+  readonly tag?: string
+}
+
+// ---------------------------------------------------------------------------
+// Agent config — identity & sandbox, set at thread creation
+// ---------------------------------------------------------------------------
+export interface AgentConfig {
+  /** Codex personality parameter — system-level persona */
+  readonly personality?: string
+  /** Codex sandbox mode */
+  readonly sandbox?: "read-only" | "workspace-write"
+  /** Paths the agent can write to (Codex sandbox.writableRoots) */
+  readonly writableRoots?: string[]
+  /** Optional model override */
+  readonly model?: string
+  /** Reasoning effort level for reasoning models */
+  readonly reasoningEffort?: "low" | "medium" | "high"
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation result — returned by evaluators
+// ---------------------------------------------------------------------------
+export interface EvalResult {
+  readonly done: boolean
+  readonly reason: string
+}
+
+// ---------------------------------------------------------------------------
+// Custom evaluator function signature
+// ---------------------------------------------------------------------------
+export type Evaluator = (
+  goal: string,
+  agentOutput: string
+) => Effect.Effect<EvalResult, Error>
 
 // ---------------------------------------------------------------------------
 // Loop state — stored in SubscriptionRef, queried by orchestrator
@@ -27,6 +70,9 @@ export interface LoopState {
   readonly maxIterations: number
   readonly lastAgentOutput: string
   readonly lastEvalResult: string
+  readonly threadId: string
+  /** Sliding window of injected context items */
+  readonly context: ReadonlyArray<ContextItem>
   readonly startedAt: number
   readonly updatedAt: number
 }
@@ -45,9 +91,37 @@ export type LoopMessage = Data.TaggedEnum<{
   Resume: {}
   /** Adjust max iterations at runtime */
   SetMaxIterations: { readonly max: number }
+  /** Inject structured context from another loop (used by pipe()) */
+  InjectContext: { readonly item: ContextItem }
+  /** Clear all injected context */
+  ClearContext: {}
 }>
 
 export const LoopMessage = Data.taggedEnum<LoopMessage>()
+
+// ---------------------------------------------------------------------------
+// Pipe strategy — how data flows between loops
+// ---------------------------------------------------------------------------
+export type PipeStrategy =
+  | { readonly _tag: "context"; readonly maxLength?: number }
+  | { readonly _tag: "notify" }
+  | { readonly _tag: "file"; readonly path: string }
+
+// ---------------------------------------------------------------------------
+// Pipe metadata — available to transform functions
+// ---------------------------------------------------------------------------
+export interface PipeMetadata {
+  readonly from: LoopId
+  readonly to: LoopId
+  readonly iteration: number
+  readonly trigger: "iteration" | "done"
+  readonly timestamp: number
+}
+
+// ---------------------------------------------------------------------------
+// Pipe transform — shapes data as it flows through a pipe
+// ---------------------------------------------------------------------------
+export type PipeTransform = (text: string, metadata: PipeMetadata) => string
 
 // ---------------------------------------------------------------------------
 // Events broadcast via PubSub (for REPL / observers)
@@ -74,4 +148,10 @@ export interface LoopConfig {
   readonly goal: string
   readonly maxIterations: number
   readonly verbose: boolean
+  /** Agent identity & sandbox config (set on thread creation) */
+  readonly agent?: AgentConfig
+  /** Max context items in sliding window (default: 5) */
+  readonly maxContextItems?: number
+  /** Custom evaluator — overrides default LLM-as-judge */
+  readonly evaluator?: Evaluator
 }

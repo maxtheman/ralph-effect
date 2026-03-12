@@ -16,6 +16,7 @@
 import { Context, Effect, Layer, Console } from "effect"
 import * as childProcess from "node:child_process"
 import * as readline from "node:readline"
+import type { AgentConfig } from "./loop-types.js"
 
 // ---------------------------------------------------------------------------
 // Types — Codex v2 protocol
@@ -56,10 +57,16 @@ interface Turn {
 export interface CodexLLMService {
   /** One-shot: create ephemeral thread, send prompt, wait for completion, return text */
   readonly generateText: (prompt: string) => Effect.Effect<string, Error>
-  /** Create a persistent thread (for multi-turn conversations) */
-  readonly createThread: () => Effect.Effect<string, Error>
-  /** Send a turn to an existing thread, wait for completion */
-  readonly sendTurn: (threadId: string, prompt: string) => Effect.Effect<string, Error>
+  /** Create a persistent thread with optional agent config (personality, sandbox) */
+  readonly createThread: (config?: AgentConfig) => Effect.Effect<string, Error>
+  /**
+   * Send a turn to an existing thread, wait for completion.
+   * Accepts either a single string (backward compat) or an array of input items.
+   */
+  readonly sendTurn: (
+    threadId: string,
+    input: string | ReadonlyArray<{ type: "text"; text: string }>
+  ) => Effect.Effect<string, Error>
   /** Archive a thread */
   readonly archiveThread: (threadId: string) => Effect.Effect<void, Error>
   /** Graceful shutdown */
@@ -141,14 +148,6 @@ class CodexTransport {
 
       const msg = JSON.stringify({ jsonrpc: "2.0", method, params, id })
       this.proc.stdin!.write(msg + "\n")
-
-      // Timeout after 5 minutes (Codex agent turns can be long)
-      setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id)
-          resume(Effect.fail(new Error(`Timeout waiting for ${method} (id=${id})`)))
-        }
-      }, 300000)
     })
   }
 
@@ -175,8 +174,7 @@ class CodexTransport {
   /** Wait for a specific notification (returns first matching) */
   waitForNotification(
     method: string,
-    predicate?: (params: Record<string, unknown>) => boolean,
-    timeoutMs = 300000
+    predicate?: (params: Record<string, unknown>) => boolean
   ): Effect.Effect<Record<string, unknown>, Error> {
     return Effect.async<Record<string, unknown>, Error>((resume) => {
       let resolved = false
@@ -193,16 +191,6 @@ class CodexTransport {
         }
       }
       this.on(method, handler)
-
-      setTimeout(() => {
-        if (!resolved) {
-          resolved = true
-          const handlers = this.listeners.get(method) ?? []
-          const idx = handlers.indexOf(handler)
-          if (idx >= 0) handlers.splice(idx, 1)
-          resume(Effect.fail(new Error(`Timeout waiting for notification: ${method}`)))
-        }
-      }, timeoutMs)
     })
   }
 
@@ -236,7 +224,7 @@ interface AgentMessageEvent {
 const sendTurnAndWait = (
   transport: CodexTransport,
   threadId: string,
-  prompt: string
+  input: ReadonlyArray<UserInput>
 ): Effect.Effect<string, Error> =>
   Effect.gen(function* () {
     // Accumulator for agent messages during this turn
@@ -251,10 +239,10 @@ const sendTurnAndWait = (
     }
     transport.on("codex/event/agent_message", messageHandler)
 
-    // Start the turn
+    // Start the turn — pass multi-item input array directly
     const turnResponse = (yield* transport.call("turn/start", {
       threadId,
-      input: [{ type: "text", text: prompt }] satisfies UserInput[],
+      input: input as UserInput[],
       approvalPolicy: "never" // Auto-approve for agent usage
     })) as { turn: Turn }
 
@@ -365,7 +353,9 @@ export const CodexLLMLive: Layer.Layer<CodexLLM, Error> = Layer.effect(
           })) as { thread: { id: string } }
 
           const threadId = threadResult.thread.id
-          const text = yield* sendTurnAndWait(transport, threadId, prompt)
+          const text = yield* sendTurnAndWait(transport, threadId, [
+            { type: "text", text: prompt }
+          ])
 
           // Archive ephemeral thread
           yield* transport.call("thread/archive", { threadId }).pipe(
@@ -375,16 +365,40 @@ export const CodexLLMLive: Layer.Layer<CodexLLM, Error> = Layer.effect(
           return text
         }),
 
-      createThread: () =>
+      createThread: (config) =>
         Effect.gen(function* () {
-          const result = (yield* transport.call("thread/start", {
+          // Build thread/start params from AgentConfig
+          // Codex app-server uses Rust serde for deserialization:
+          //   - sandbox: string ("workspace-write" | "read-only")
+          //   - instructions: system-level prompt (not "personality")
+          //   - model: model name string
+          const params: Record<string, unknown> = {
             approvalPolicy: "never",
-            sandbox: "workspace-write"
-          })) as { thread: { id: string } }
+            sandbox: config?.sandbox ?? "workspace-write"
+          }
+          if (config?.personality) {
+            params.instructions = config.personality
+          }
+          if (config?.model) {
+            params.model = config.model
+          }
+          if (config?.reasoningEffort) {
+            params.reasoningEffort = config.reasoningEffort
+          }
+          const result = (yield* transport.call("thread/start", params)) as {
+            thread: { id: string }
+          }
           return result.thread.id
         }),
 
-      sendTurn: (threadId, prompt) => sendTurnAndWait(transport, threadId, prompt),
+      sendTurn: (threadId, input) => {
+        // Normalize: accept string (backward compat) or input array
+        const items: ReadonlyArray<UserInput> =
+          typeof input === "string"
+            ? [{ type: "text", text: input }]
+            : input
+        return sendTurnAndWait(transport, threadId, items)
+      },
 
       archiveThread: (threadId) =>
         Effect.gen(function* () {

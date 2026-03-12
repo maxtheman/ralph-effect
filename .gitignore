@@ -4,3 +4,7 @@ dist/
 *.d.ts
 *.js.map
 !src/**
+
+# Generated workflow outputs
+examples/hello-world-output.md
+examples/poem-final.md

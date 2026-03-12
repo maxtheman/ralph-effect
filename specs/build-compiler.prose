@@ -1,0 +1,80 @@
+# Build the OpenProse-to-Ralph Compiler
+# This .prose file describes the implementer-architect-critique loop
+# that ralph uses to build the DSL compiler.
+# (This is the first app on top of ralph-effect.)
+
+agent implementer:
+  model: o4-mini
+  prompt: You are a senior TypeScript developer. You write clean, well-documented code. You follow the spec exactly and produce working code with zero TypeScript errors. You read the full spec before writing any code. You write all files in a single pass, then run tsc to verify.
+  sandbox: workspace-write
+  writableRoots: [src/dsl]
+
+agent architect:
+  model: o4-mini
+  prompt: You are a software architect who reviews code for API design, type safety, and adherence to specifications. You read the spec and the implementation, then write a detailed review focusing on correctness, missing edge cases, and API ergonomics. You are constructive but thorough.
+  sandbox: read-only
+
+agent critic:
+  model: o4-mini
+  prompt: You are a QA engineer and code critic. You look for bugs, missing error handling, spec violations, and test gaps. You try to break the implementation by thinking of edge cases. You write specific, actionable feedback with file and line references.
+  sandbox: read-only
+
+# Round 1: Implement
+session: implementer
+  Read the compiler specification at specs/prose-compiler.md.
+  Read the existing types at src/loop-types.ts and src/orchestrator.ts.
+  Implement the full compiler in src/dsl/ following the spec exactly.
+  Create these files:
+    - src/dsl/ast.ts (AST types)
+    - src/dsl/parser.ts (recursive descent parser)
+    - src/dsl/compiler.ts (AST to Effect compiler)
+    - src/dsl/checks.ts (built-in check evaluators)
+    - src/dsl/evaluators.ts (evaluator routing)
+    - src/dsl/index.ts (public API)
+    - src/dsl/cli.ts (CLI entry point)
+  After writing all files, run: npx tsc --noEmit
+  Fix any TypeScript errors until compilation is clean.
+  max: 5
+
+# Round 1: Review (after implementer finishes)
+pipe implementer -> architect on done via notify
+pipe implementer -> critic on done via notify
+
+session: architect
+  depends_on: [implementer]
+  Read the spec at specs/prose-compiler.md.
+  Read all files in src/dsl/ that the implementer created.
+  Write a detailed architecture review to .ralph/reviews/architect.md covering:
+  1. Does the implementation match the spec?
+  2. Are the AST types complete and correct?
+  3. Is the parser handling all syntax cases from the spec?
+  4. Is the compiler producing correct orchestrator calls?
+  5. Are there any type safety issues?
+  6. API ergonomics: is the public interface clean?
+  Be specific: reference file names and line numbers.
+  max: 2
+
+session: critic
+  depends_on: [implementer]
+  Read the spec at specs/prose-compiler.md.
+  Read all files in src/dsl/ that the implementer created.
+  Write a detailed critique to .ralph/reviews/critic.md covering:
+  1. Try to break the parser with edge cases (empty files, bad indentation, missing fields)
+  2. Check error handling: do parse/compile errors report line numbers?
+  3. Check the acceptance criteria from the spec - which ones are NOT met?
+  4. Look for bugs in the compiler logic (topological sort, variable interpolation)
+  5. Check that imports use .js extensions and types are imported correctly
+  Be specific: reference file names, line numbers, and exact issues.
+  max: 2
+
+# Round 2: Address Feedback
+session: implementer
+  depends_on: [architect, critic]
+  Read the architecture review at .ralph/reviews/architect.md.
+  Read the critique at .ralph/reviews/critic.md.
+  Address every issue raised by the architect and critic.
+  Fix bugs, add missing error handling, improve the implementation.
+  After fixing, run: npx tsc --noEmit
+  Ensure TypeScript compiles with zero errors.
+  Report what you fixed and what was already correct.
+  max: 5

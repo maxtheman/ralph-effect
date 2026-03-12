@@ -1,0 +1,16 @@
+# Hello World — minimal OpenProse workflow
+# A single agent writes a haiku about computing to a file.
+
+agent writer:
+  model: sonnet
+  prompt: You are a minimalist poet. Write only what is asked, nothing more.
+  sandbox: workspace-write
+
+let output_path = "examples/hello-world-output.md"
+
+session: writer
+  Write a haiku about recursion and save it to {{output_path}}
+  max: 2
+  evaluate:
+    who: check:file-not-empty
+    args: { path: examples/hello-world-output.md }
