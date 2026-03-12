@@ -1,5 +1,9 @@
 /**
  * compiler.ts — Compile OpenProse ASTs into Effect programs over the Orchestrator service.
+ *
+ * Takes ASTs produced by the OpenProse parser and emits typed Effect programs
+ * that call the ralph orchestrator API. The OpenProse language specification
+ * is at: https://github.com/openprose/prose (MIT license, copyright OpenProse).
  */
 import { Effect, Either } from "effect"
 import type {

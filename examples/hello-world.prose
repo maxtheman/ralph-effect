@@ -1,5 +1,6 @@
 # Hello World — minimal OpenProse workflow
 # A single agent writes a haiku about computing to a file.
+# Language: OpenProse (https://github.com/openprose/prose)
 
 agent writer:
   model: gpt-5.4

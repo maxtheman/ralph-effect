@@ -1,4 +1,5 @@
 # Build the OpenProse-to-Ralph Compiler
+# Language: OpenProse (https://github.com/openprose/prose)
 # This .prose file describes the implementer-architect-critique loop
 # that ralph uses to build the DSL compiler.
 # (This is the first app on top of ralph-effect.)

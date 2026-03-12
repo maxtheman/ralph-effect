@@ -1,8 +1,13 @@
 # OpenProse-to-Ralph Compiler Specification
 
+> **Language Credit**: The `.prose` language syntax and semantics implemented here are
+> defined by the [OpenProse](https://github.com/openprose/prose) project (MIT license,
+> copyright OpenProse). This spec describes how to compile a subset of OpenProse into
+> ralph orchestrator calls — it does not define the language itself.
+
 ## Overview
 
-Build a compiler that reads `.prose` workflow files (OpenProse-compatible syntax) and produces `Effect<void, Error, Orchestrator>` programs that drive the ralph orchestrator.
+Build a compiler that reads `.prose` workflow files ([OpenProse](https://github.com/openprose/prose) syntax) and produces `Effect<void, Error, Orchestrator>` programs that drive the ralph orchestrator.
 
 The compiler lives in `src/dsl/` and has four main parts:
 1. **AST types** (`ast.ts`) — TypeScript discriminated unions for every syntax node

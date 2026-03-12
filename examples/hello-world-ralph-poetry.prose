@@ -1,4 +1,5 @@
 # Ralph Poetry Workshop — replicates the poet <-> critic loop from run-poetry-loop.ts
+# Language: OpenProse (https://github.com/openprose/prose)
 #
 # Two agents iterate on each other's work:
 #   - poet: generates and refines a poem, writes to a file

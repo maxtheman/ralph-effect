@@ -62,7 +62,17 @@ A key design choice: the agent's **goal** and **injected context** are kept in s
 
 ## OpenProse: `.prose` Scripting
 
-OpenProse is a line-oriented, indentation-sensitive scripting language where every statement is simultaneously a program instruction and a natural language prompt. The parser is a hand-written recursive descent — no external grammar dependencies. The compiler emits live `Effect.Effect<void, Error, Orchestrator>` programs.
+The `.prose` language used by ralph-effect is **[OpenProse](https://github.com/openprose/prose)** — an open-source programming language for orchestrating long-running AI agent sessions, created by the [OpenProse](https://prose.md) project. OpenProse is the language specification; ralph-effect is one compilation target.
+
+OpenProse's core insight is that a sufficiently detailed specification, given to a capable AI session, turns that session into a virtual machine. The language gives you structure where it matters (control flow, agent definitions, dependency ordering) and natural language where you want flexibility (semantic conditions, context passing, goal descriptions). The `**...**` syntax for semantic evaluation — where the AI interprets conditions like `**the code is production ready**` rather than requiring boolean expressions — is a defining feature of the OpenProse spec.
+
+Ralph-effect implements a **compiled** backend for OpenProse: the parser reads `.prose` files, builds an AST, and the compiler emits typed `Effect.Effect<void, Error, Orchestrator>` programs that call the ralph orchestrator API. This is different from the reference OpenProse execution model (where a Prose Complete system directly interprets `.prose` files) — ralph compiles them ahead-of-time into Effect.ts programs backed by Codex.
+
+For the full OpenProse language specification, examples, and reference implementation, see:
+- **Specification**: [github.com/openprose/prose](https://github.com/openprose/prose)
+- **Cloud**: [prose.md](https://prose.md)
+
+> **Attribution**: The `.prose` language syntax, semantics, and specification are the work of the [OpenProse project](https://github.com/openprose/prose), licensed under MIT. Ralph-effect's parser and compiler implement a subset of the OpenProse specification as a compilation target for the Effect.ts orchestrator.
 
 ### Hello World
 
@@ -207,6 +217,16 @@ examples/
 - [Codex CLI](https://github.com/openai/codex) running as app-server (`codex --app-server`)
 - An OpenAI API key configured for Codex
 
+## Acknowledgments
+
+**[OpenProse](https://github.com/openprose/prose)** — The `.prose` language specification that this project implements a compiler for. OpenProse is an open-source programming language for long-running AI sessions. The language design, syntax, and semantics are entirely the work of the OpenProse project. Ralph-effect is a downstream compiler that targets Effect.ts; it does not claim authorship of the language itself.
+
+**[Effect.ts](https://effect.website)** — The typed functional programming framework that provides the concurrency primitives (FiberMap, Queue, SubscriptionRef, PubSub) underpinning the orchestrator.
+
+**[OpenAI Codex](https://github.com/openai/codex)** — The sandboxed coding agent whose app-server JSON-RPC protocol provides the LLM execution backend.
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
+
+The `.prose` language specification is copyright [OpenProse](https://github.com/openprose/prose) and separately licensed under MIT.

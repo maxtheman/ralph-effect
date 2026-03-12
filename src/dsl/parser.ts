@@ -1,5 +1,9 @@
 /**
  * parser.ts — Recursive descent parser for indentation-sensitive `.prose` files.
+ *
+ * Parses a subset of the OpenProse language specification into an AST.
+ * The OpenProse language is defined at: https://github.com/openprose/prose
+ * (MIT license, copyright OpenProse).
  */
 import type {
   AgentDecl,

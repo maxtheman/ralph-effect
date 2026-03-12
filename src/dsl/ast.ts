@@ -1,5 +1,9 @@
 /**
  * ast.ts — OpenProse AST node types for the Ralph workflow compiler.
+ *
+ * The `.prose` language syntax and semantics are defined by the OpenProse
+ * specification: https://github.com/openprose/prose (MIT license).
+ * This file implements AST types for a subset of that specification.
  */
 import type { PipeStrategy } from "../loop-types.js"
 

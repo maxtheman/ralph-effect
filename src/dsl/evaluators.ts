@@ -1,5 +1,8 @@
 /**
  * evaluators.ts — Routing from `evaluate:` annotations to executable evaluators.
+ *
+ * Implements evaluator resolution for the OpenProse `evaluate:` syntax.
+ * OpenProse language spec: https://github.com/openprose/prose (MIT license).
  */
 import { Effect } from "effect"
 import { CodexLLM, CodexLLMLive } from "../codex-client.js"

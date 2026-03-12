@@ -1,5 +1,7 @@
 /**
  * index.ts — Public API for loading, compiling, and running OpenProse workflows.
+ *
+ * OpenProse language spec: https://github.com/openprose/prose (MIT license).
  */
 import { Effect } from "effect"
 import * as fs from "node:fs"

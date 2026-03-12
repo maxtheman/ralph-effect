@@ -1,5 +1,7 @@
 /**
  * cli.ts — Command-line entry point for executing `.prose` workflows.
+ *
+ * OpenProse language spec: https://github.com/openprose/prose (MIT license).
  */
 import { Console, Effect } from "effect"
 import { CodexLLMLive } from "../codex-client.js"
