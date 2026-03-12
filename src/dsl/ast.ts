@@ -40,6 +40,7 @@ export interface AgentDecl extends Loc {
   readonly _tag: "AgentDecl"
   readonly name: string
   readonly model?: string
+  readonly reasoningEffort?: "low" | "medium" | "high"
   readonly prompt?: string
   readonly sandbox?: "read-only" | "workspace-write"
   readonly writableRoots?: ReadonlyArray<string>

@@ -1,0 +1,43 @@
+# Ralph Poetry Workshop — replicates the poet <-> critic loop from run-poetry-loop.ts
+#
+# Two agents iterate on each other's work:
+#   - poet: generates and refines a poem, writes to a file
+#   - critic: critiques the poet's output, writes feedback to a file
+#
+# Pipes wire them bidirectionally:
+#   poet -> critic via file (critic reads the poem file)
+#   critic -> poet via notify (poet gets a signal, reads critique file directly)
+
+agent poet:
+  model: gpt-5.4
+  reasoningEffort: low
+  prompt: You are a modernist poet who values concrete imagery over abstraction.
+  sandbox: workspace-write
+
+agent critic:
+  model: gpt-5.4
+  reasoningEffort: low
+  prompt: You are a demanding poetry critic focused on craft, imagery, and meter.
+  sandbox: workspace-write
+
+let poem_path = "examples/ralph-poem.md"
+let critique_path = "examples/ralph-critique.md"
+
+session: poet
+  Write an original 4-stanza poem about recursion and self-reference.
+  Use concrete imagery, not abstract platitudes.
+  Each stanza should have 4 lines with roughly consistent meter.
+  Write the poem to {{poem_path}}
+  max: 3
+
+session: critic
+  You are a poetry critic. When you receive context from the poet loop,
+  read the poem at {{poem_path}} and write a sharp critique
+  to {{critique_path}}.
+  Focus on: imagery strength, metric consistency, avoiding cliche.
+  Suggest specific line-level rewrites.
+  If no poem exists yet, wait for context.
+  max: 3
+
+pipe poet -> critic on iteration via file {{poem_path}}
+pipe critic -> poet on iteration via notify

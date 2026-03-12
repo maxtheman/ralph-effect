@@ -165,7 +165,8 @@ const collectScopeStatics = (
           personality: declaration.prompt,
           sandbox: declaration.sandbox,
           writableRoots: declaration.writableRoots ? [...declaration.writableRoots] : undefined,
-          model: declaration.model
+          model: declaration.model,
+          reasoningEffort: declaration.reasoningEffort
         })
         if (!state.implicitAgentNames.includes(declaration.name)) {
           state.implicitAgentNames.push(declaration.name)

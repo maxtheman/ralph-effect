@@ -261,6 +261,7 @@ class Parser {
     }
 
     let model: string | undefined
+    let reasoningEffort: AgentDecl["reasoningEffort"]
     let prompt: string | undefined
     let sandbox: AgentDecl["sandbox"]
     let writableRoots: ReadonlyArray<string> | undefined
@@ -279,6 +280,13 @@ class Parser {
 
       if (next.text.startsWith("model:")) {
         model = next.text.slice("model:".length).trim()
+      } else if (next.text.startsWith("reasoningEffort:")) {
+        const val = next.text.slice("reasoningEffort:".length).trim()
+        if (val === "low" || val === "medium" || val === "high") {
+          reasoningEffort = val
+        } else {
+          this.addError(next.line, `Invalid reasoningEffort value: ${val} (must be low, medium, or high)`)
+        }
       } else if (next.text.startsWith("prompt:")) {
         prompt = next.text.slice("prompt:".length).trim()
       } else if (next.text.startsWith("sandbox:")) {
@@ -308,6 +316,7 @@ class Parser {
       line: line.line,
       name: match[1],
       model,
+      reasoningEffort,
       prompt,
       sandbox,
       writableRoots

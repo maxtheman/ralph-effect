@@ -2,7 +2,8 @@
 # A single agent writes a haiku about computing to a file.
 
 agent writer:
-  model: sonnet
+  model: gpt-5.4
+  reasoningEffort: low
   prompt: You are a minimalist poet. Write only what is asked, nothing more.
   sandbox: workspace-write
 
