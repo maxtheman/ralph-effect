@@ -108,6 +108,9 @@ export interface OrchestratorService {
 
   /** Wait for all loops to complete */
   readonly awaitAll: () => Effect.Effect<void>
+
+  /** Wait for specific loops to complete (for pipeline iteration) */
+  readonly awaitIds: (ids: ReadonlyArray<LoopId>) => Effect.Effect<void>
 }
 
 // ---------------------------------------------------------------------------
@@ -233,8 +236,17 @@ export const OrchestratorLive: Layer.Layer<Orchestrator, never, CodexLLM> = Laye
 
     const createHandle = (config: LoopConfig, status: LoopStatus): Effect.Effect<LoopHandle, Error> =>
       Effect.gen(function* () {
-        if (handles.has(config.id)) {
-          return yield* Effect.fail(new Error(`Loop already exists: ${config.id}`))
+        const existing = handles.get(config.id)
+        if (existing) {
+          // Allow re-fork of terminal loops (idempotent IDs for pipeline iteration)
+          const state = yield* SubscriptionRef.get(existing.stateRef)
+          if (state.status === "done" || state.status === "failed" || state.status === "interrupted") {
+            // Reclaim: remove old handle and fiber, allow fresh fork
+            handles.delete(config.id)
+            yield* FiberMap.remove(fibers, config.id).pipe(Effect.catchAll(() => Effect.void))
+          } else {
+            return yield* Effect.fail(new Error(`Loop already exists and is ${state.status}: ${config.id}`))
+          }
         }
 
         const queue = yield* Queue.unbounded<LoopMessage>()
@@ -332,6 +344,7 @@ export const OrchestratorLive: Layer.Layer<Orchestrator, never, CodexLLM> = Laye
         for (const id of ids) {
           const handle = handles.get(id)
           if (!handle) {
+            remaining.delete(id) // Not forked (conditional path), nothing to wait for
             continue
           }
           const state = yield* SubscriptionRef.get(handle.stateRef)
@@ -567,7 +580,9 @@ export const OrchestratorLive: Layer.Layer<Orchestrator, never, CodexLLM> = Laye
 
       subscribe: () => PubSub.subscribe(eventBus),
 
-      awaitAll: () => FiberMap.join(fibers).pipe(Effect.catchAll(() => Effect.void))
+      awaitAll: () => FiberMap.join(fibers).pipe(Effect.catchAll(() => Effect.void)),
+
+      awaitIds: (ids) => Effect.scoped(waitForOutcomes(ids))
     }
 
     return service

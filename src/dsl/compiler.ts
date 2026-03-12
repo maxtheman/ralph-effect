@@ -13,6 +13,7 @@ import type {
   LoopUntilBlock,
   MapExpr,
   PipeDecl,
+  PipelineBlock,
   Program,
   ReduceExpr,
   SessionBlock,
@@ -201,14 +202,22 @@ const collectSessionIds = (declarations: ReadonlyArray<Declaration>, state: Comp
         collectSessionIds(declaration.sessions, state)
         break
       case "LoopUntilBlock": {
-        const id = sessionIdOf(declaration.body)
-        if (state.sessionIds.has(id)) {
-          addError(state, declaration.line, `Duplicate session identifier: ${id}`)
+        if (declaration.body._tag === "SessionBlock") {
+          const id = sessionIdOf(declaration.body)
+          if (state.sessionIds.has(id)) {
+            addError(state, declaration.line, `Duplicate session identifier: ${id}`)
+          } else {
+            state.sessionIds.set(id, declaration.line)
+          }
         } else {
-          state.sessionIds.set(id, declaration.line)
+          // PipelineBlock body: recurse into its declarations
+          collectSessionIds(declaration.body.declarations, state)
         }
         break
       }
+      case "PipelineBlock":
+        collectSessionIds(declaration.declarations, state)
+        break
       case "ReduceExpr": {
         const id = reduceIdOf(declaration)
         if (state.sessionIds.has(id)) {
@@ -261,16 +270,24 @@ const validateDependencies = (
         validateDependencies(declaration.sessions, state, graph)
         break
       case "LoopUntilBlock": {
-        const id = sessionIdOf(declaration.body)
-        const deps = declaration.body.dependsOn ?? []
-        graph.set(id, { deps, line: declaration.line })
-        for (const dep of deps) {
-          if (!state.sessionIds.has(dep)) {
-            addError(state, declaration.line, `Unknown dependency: ${dep}`)
+        if (declaration.body._tag === "SessionBlock") {
+          const id = sessionIdOf(declaration.body)
+          const deps = declaration.body.dependsOn ?? []
+          graph.set(id, { deps, line: declaration.line })
+          for (const dep of deps) {
+            if (!state.sessionIds.has(dep)) {
+              addError(state, declaration.line, `Unknown dependency: ${dep}`)
+            }
           }
+        } else {
+          // PipelineBlock body: validate dependencies within the pipeline
+          validateDependencies(declaration.body.declarations, state, graph)
         }
         break
       }
+      case "PipelineBlock":
+        validateDependencies(declaration.declarations, state, graph)
+        break
       case "PipeDecl":
         if (!state.sessionIds.has(declaration.from)) {
           addError(state, declaration.line, `Unknown pipe source: ${declaration.from}`)
@@ -461,11 +478,86 @@ const compilePipe = (
   })
 }
 
+/** Collect session IDs that will be forked directly by a pipeline body. */
+const collectPipelineSessionIds = (declarations: ReadonlyArray<Declaration>): string[] => {
+  const ids: string[] = []
+  for (const decl of declarations) {
+    switch (decl._tag) {
+      case "SessionBlock":
+        ids.push(sessionIdOf(decl))
+        break
+      case "ParallelBlock":
+        for (const s of decl.sessions) {
+          ids.push(sessionIdOf(s))
+        }
+        break
+      case "LoopUntilBlock":
+        // Only include session-body loops (pipeline-body loops manage their own awaiting)
+        if (decl.body._tag === "SessionBlock") {
+          ids.push(sessionIdOf(decl.body))
+        }
+        break
+      default:
+        break
+    }
+  }
+  return ids
+}
+
 const compileLoopUntil = (
   loop: LoopUntilBlock,
   state: CompileState
 ): Effect.Effect<void, Error, Orchestrator> => {
   const condition = interpolate(loop.condition, loop.line, state)
+
+  // ---------------------------------------------------------------------------
+  // Pipeline body: multi-agent iteration loop
+  // ---------------------------------------------------------------------------
+  if (loop.body._tag === "PipelineBlock") {
+    const pipelineState = cloneState(state)
+    // Pre-collect statics so evaluator resolution can see pipeline-scoped agents
+    collectScopeStatics(loop.body.declarations, pipelineState)
+
+    const annotation = normalizeAnnotation(loop.evaluate, loop.line, pipelineState)
+    const evaluator = safeResolveSemanticEvaluator(condition, annotation, loop.line, pipelineState)
+    mergeErrors(state, pipelineState)
+
+    // Compile the pipeline body into a reusable Effect
+    const bodyEffect = compileScope(loop.body.declarations, pipelineState)
+    mergeErrors(state, pipelineState)
+
+    const sessionIds = collectPipelineSessionIds(loop.body.declarations)
+    const max = loop.max ?? 10
+
+    return Effect.gen(function* () {
+      const orch = yield* Orchestrator
+
+      for (let iteration = 0; iteration < max; iteration++) {
+        // Fork all pipeline sessions, register pipes, etc.
+        yield* bodyEffect
+
+        // Wait for all pipeline sessions to reach terminal state
+        yield* orch.awaitIds(sessionIds)
+
+        // Collect outputs from completed sessions for evaluation
+        const statuses = yield* Effect.all(
+          sessionIds.map((id) => orch.status(id))
+        )
+        const combinedOutput = statuses
+          .map((s) => `[${s.id}]: ${s.lastAgentOutput}`)
+          .join("\n---\n")
+
+        // Evaluate the semantic condition (evaluator is always defined from safeResolveSemanticEvaluator)
+        const evalResult = yield* evaluator!(condition, combinedOutput)
+        if (evalResult.done) break
+        // Next iteration: idempotent IDs reclaim terminal loops automatically
+      }
+    })
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session body: original single-session loop (ralph handles iteration)
+  // ---------------------------------------------------------------------------
   const annotation = normalizeAnnotation(loop.evaluate ?? loop.body.evaluate, loop.line, state)
   const evaluator = safeResolveSemanticEvaluator(condition, annotation, loop.line, state)
   const config = buildLoopConfig(loop.body, state, {
@@ -594,17 +686,24 @@ type TopologyManagedDeclaration = SessionBlock | LoopUntilBlock
 const isTopologyManagedDeclaration = (
   declaration: Declaration
 ): declaration is TopologyManagedDeclaration =>
-  declaration._tag === "SessionBlock" || declaration._tag === "LoopUntilBlock"
+  declaration._tag === "SessionBlock" ||
+  (declaration._tag === "LoopUntilBlock" && declaration.body._tag === "SessionBlock")
 
-const topologyIdOf = (declaration: TopologyManagedDeclaration): string =>
-  declaration._tag === "SessionBlock" ? sessionIdOf(declaration) : sessionIdOf(declaration.body)
+const topologyIdOf = (declaration: TopologyManagedDeclaration): string => {
+  if (declaration._tag === "SessionBlock") return sessionIdOf(declaration)
+  // isTopologyManagedDeclaration guarantees body is SessionBlock
+  const body = declaration.body as SessionBlock
+  return sessionIdOf(body)
+}
 
 const topologyDepsOf = (
   declaration: TopologyManagedDeclaration
-): ReadonlyArray<string> =>
-  declaration._tag === "SessionBlock"
-    ? (declaration.dependsOn ?? [])
-    : (declaration.body.dependsOn ?? [])
+): ReadonlyArray<string> => {
+  if (declaration._tag === "SessionBlock") return declaration.dependsOn ?? []
+  // isTopologyManagedDeclaration guarantees body is SessionBlock
+  const body = declaration.body as SessionBlock
+  return body.dependsOn ?? []
+}
 
 const orderScopeDeclarations = (
   declarations: ReadonlyArray<Declaration>
@@ -788,6 +887,12 @@ const compileDeclaration = (
       return compileParallel(declaration.sessions, state)
     case "LoopUntilBlock":
       return compileLoopUntil(declaration, state)
+    case "PipelineBlock": {
+      const pipeState = cloneState(state)
+      const eff = compileScope(declaration.declarations, pipeState)
+      mergeErrors(state, pipeState)
+      return eff
+    }
     case "PipeDecl":
       return compilePipe(declaration, state)
     case "IfBlock":

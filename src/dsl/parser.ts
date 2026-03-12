@@ -15,6 +15,7 @@ import type {
   LoopUntilBlock,
   MapExpr,
   ParallelBlock,
+  PipelineBlock,
   PipeDecl,
   Program,
   ReduceExpr,
@@ -242,6 +243,7 @@ class Parser {
       return this.parseLetDecl()
     }
     if (line.text === "parallel:") return this.parseParallelBlock(indent)
+    if (line.text === "pipeline:") return this.parsePipelineBlock(indent)
     if (line.text.startsWith("loop until ")) return this.parseLoopUntilBlock(indent)
     if (line.text.startsWith("pipe ")) return this.parsePipeDecl()
     if (line.text.startsWith("if ")) return this.parseIfBlock(indent)
@@ -552,6 +554,23 @@ class Parser {
     }
   }
 
+  private parsePipelineBlock(indent: number): PipelineBlock {
+    const line = this.current()!
+    this.advance() // consume "pipeline:"
+
+    const declarations = this.parseDeclarations(indent + 1)
+
+    if (declarations.length === 0) {
+      this.addError(line.line, "Pipeline block requires at least one declaration")
+    }
+
+    return {
+      _tag: "PipelineBlock",
+      line: line.line,
+      declarations
+    }
+  }
+
   private parseLoopUntilBlock(indent: number): LoopUntilBlock {
     const line = this.current()!
     const match = line.text.match(/^loop until\s+\*\*(.+?)\*\*(?:\s+\(max:\s*(\d+)\))?:$/)
@@ -582,8 +601,8 @@ class Parser {
     }
 
     const bodyLine = this.current()
-    if (!bodyLine || bodyLine.indent !== indent + 1 || !this.isSessionHeader(bodyLine.text)) {
-      this.addError(line.line, "Loop-until block requires a nested session")
+    if (!bodyLine || bodyLine.indent !== indent + 1) {
+      this.addError(line.line, "Loop-until block requires a nested session or pipeline")
       return {
         _tag: "LoopUntilBlock",
         line: line.line,
@@ -599,7 +618,28 @@ class Parser {
       }
     }
 
-    const body = this.parseSessionBlock(indent + 1)
+    let body: SessionBlock | PipelineBlock
+    if (bodyLine.text === "pipeline:") {
+      body = this.parsePipelineBlock(indent + 1)
+    } else if (this.isSessionHeader(bodyLine.text)) {
+      body = this.parseSessionBlock(indent + 1)
+    } else {
+      this.addError(bodyLine.line, `Loop-until body must be a session or pipeline, got: ${bodyLine.text}`)
+      this.advance()
+      return {
+        _tag: "LoopUntilBlock",
+        line: line.line,
+        condition: match[1],
+        max: match[2] ? Number.parseInt(match[2], 10) : undefined,
+        body: {
+          _tag: "SessionBlock",
+          line: line.line,
+          agent: "__invalid__",
+          goal: ""
+        },
+        evaluate
+      }
+    }
 
     if (
       this.current() &&

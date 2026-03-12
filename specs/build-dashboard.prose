@@ -1,0 +1,180 @@
+# Build the Ralph Dashboard — Phase 4
+# Language: OpenProse (https://github.com/openprose/prose)
+#
+# Architecture: An architect agent defines and owns a completion rubric.
+# Workers (backend, frontend) implement. Critic reviews against the rubric.
+# The entire pipeline loops until the rubric is satisfied.
+#
+# Pipeline iteration model:
+#   Each iteration of the outer loop runs the full pipeline:
+#     1. Architect reads spec/scorecard, writes rubric + assignments
+#     2. Backend + frontend implement concurrently (depends_on architect)
+#     3. Critic evaluates against rubric (depends_on backend, frontend)
+#     4. Evaluator checks .ralph/rubric.md for "STATUS: COMPLETE"
+#   If not complete, all sessions re-fork (idempotent IDs) and iterate.
+#
+# The architect decides when the rubric is met by writing STATUS: COMPLETE.
+# The check:file-contains evaluator on the loop detects this mechanically.
+
+agent architect:
+  model: gpt-5.4
+  reasoningEffort: high
+  prompt: You are a senior software architect. Your job is to define and maintain a completion rubric for a dashboard implementation project.
+
+    On your FIRST iteration:
+    1. Read the full spec at specs/dashboard.md
+    2. Read existing code: src/orchestrator.ts, src/loop-types.ts, src/codex-client.ts, src/repl.ts, src/dsl/index.ts
+    3. Write a rubric to .ralph/rubric.md with:
+       - A checklist of EVERY concrete deliverable from the spec
+       - Each item has: [ ] description | file | acceptance test
+       - Group by: Backend, Frontend, Integration, End-to-End
+       - STATUS: IN_PROGRESS at the top
+    4. Write initial work assignments to .ralph/assignments.md:
+       - What the backend agent should build first
+       - What the frontend agent should build first
+       - Any sequencing constraints
+
+    On SUBSEQUENT iterations:
+    1. Read .ralph/reviews/scorecard.md (critic's evaluation)
+    2. Read the current .ralph/rubric.md
+    3. For each rubric item, check the scorecard:
+       - If scored PASS → mark [x] in rubric
+       - If scored FAIL → keep [ ] and note what's wrong
+    4. If ALL items are [x]:
+       - Change STATUS: IN_PROGRESS to STATUS: COMPLETE
+       - You are done
+    5. If items remain [ ]:
+       - Update .ralph/assignments.md with specific fix instructions
+       - Keep STATUS: IN_PROGRESS
+       - Note which items are blocking
+  sandbox: workspace-write
+  writableRoots: [.ralph]
+
+agent backend:
+  model: gpt-5.4
+  reasoningEffort: medium
+  prompt: You are a senior TypeScript backend developer specializing in Effect.ts and Hono.
+
+    You read specs carefully and implement working code. You understand Effect.ts patterns (Effect.gen, Layers, Context.Tag, PubSub, Queue, SubscriptionRef). You write clean, minimal code.
+
+    On EVERY iteration:
+    1. Read .ralph/assignments.md for your current task
+    2. Read specs/dashboard.md for reference
+    3. Read existing code in src/ to understand the codebase
+    4. Implement or fix the assigned work
+    5. Run `npx tsc --noEmit` and fix all TypeScript errors
+    6. Write a brief status to .ralph/status/backend.md listing what you did
+
+    If this is your first iteration and no assignments exist yet, read the spec and implement:
+    - src/ui-types.ts (shared types)
+    - src/server.ts (Hono HTTP server with all API routes)
+    - src/cli-server.ts (CLI entry point)
+    Install deps first: npm install hono @hono/node-server
+  sandbox: workspace-write
+  writableRoots: [src, .ralph/status, package.json, package-lock.json, node_modules]
+
+agent frontend:
+  model: gpt-5.4
+  reasoningEffort: medium
+  prompt: You are a senior TypeScript frontend developer specializing in React 19, Vite, Tailwind CSS, and React Flow (@xyflow/react).
+
+    You write clean, accessible React components. You set up Vite projects from scratch.
+
+    On EVERY iteration:
+    1. Read .ralph/assignments.md for your current task
+    2. Read specs/dashboard.md for reference
+    3. Read src/ui-types.ts and src/loop-types.ts for shared types
+    4. Implement or fix the assigned work
+    5. Run `cd frontend && npx tsc --noEmit` and fix all TypeScript errors
+    6. Write a brief status to .ralph/status/frontend.md listing what you did
+
+    If this is your first iteration and no assignments exist yet, read the spec and:
+    - Scaffold: npm create vite@latest frontend -- --template react-ts
+    - Install deps: cd frontend && npm install && npm install @xyflow/react tailwindcss @tailwindcss/vite zod
+    - Check if @json-render/react exists: npm info @json-render/react
+      If not, implement a manual Renderer (recursive JSON→React with Zod validation)
+    - Implement all frontend components from the spec
+  sandbox: workspace-write
+  writableRoots: [frontend, .ralph/status]
+
+agent critic:
+  model: gpt-5.4
+  reasoningEffort: high
+  prompt: You are a QA engineer and integration specialist. You evaluate implementations against a rubric.
+
+    On EVERY iteration:
+    1. Read .ralph/rubric.md for the completion rubric
+    2. Read specs/dashboard.md for the original spec
+    3. Read ALL implementation files:
+       - Backend: src/server.ts, src/cli-server.ts, src/ui-types.ts
+       - Frontend: frontend/src/ (all components, hooks, catalog)
+    4. For EACH rubric item, determine PASS or FAIL:
+       - PASS: The implementation satisfies the rubric item completely
+       - FAIL: Describe specifically what's wrong or missing
+    5. Write a scorecard to .ralph/reviews/scorecard.md:
+       - Each rubric item → PASS or FAIL with evidence
+       - Integration issues (API mismatch between backend and frontend)
+       - Type safety issues across the boundary
+       - A summary: X/Y items passing
+    6. Run `npx tsc --noEmit` to check backend compiles
+    7. Run `cd frontend && npx tsc --noEmit` to check frontend compiles
+       Include compile results in the scorecard.
+  sandbox: read-only
+
+# ============================================================
+# The full build loop: pipeline iterates until rubric complete
+# ============================================================
+
+loop until **rubric at .ralph/rubric.md contains STATUS: COMPLETE** (max: 8):
+  evaluate: check:file-contains args: {path: .ralph/rubric.md, pattern: "STATUS: COMPLETE"}
+  pipeline:
+
+    # --- Step 1: Architect defines/updates rubric + assignments ---
+    session: architect
+      Read the spec at specs/dashboard.md and the current state of the codebase.
+      If .ralph/rubric.md does not exist, create it with a full rubric from the spec.
+      If .ralph/reviews/scorecard.md exists, read it and update the rubric.
+      Update .ralph/assignments.md with work for the next round.
+      If all rubric items pass, set STATUS: COMPLETE in .ralph/rubric.md.
+      max: 2
+
+    # --- Step 2: Pipe assignments to workers ---
+    pipe architect -> backend on done via file .ralph/assignments.md
+    pipe architect -> frontend on done via file .ralph/assignments.md
+
+    # --- Step 3: Workers implement concurrently ---
+    session: backend
+      depends_on: [architect]
+      Read .ralph/assignments.md and specs/dashboard.md.
+      Implement or fix the backend as assigned.
+      After each change, run npx tsc --noEmit and fix errors.
+      Write status to .ralph/status/backend.md.
+      max: 5
+      evaluate: check:tests-pass args: {command: "npx tsc --noEmit"}
+
+    session: frontend
+      depends_on: [architect]
+      Read .ralph/assignments.md and specs/dashboard.md.
+      Implement or fix the frontend as assigned.
+      Check if @json-render/react is available on npm.
+      If not, implement a manual json-render equivalent.
+      After each change, run cd frontend && npx tsc --noEmit and fix errors.
+      Write status to .ralph/status/frontend.md.
+      max: 5
+
+    # --- Step 4: Pipe results to critic ---
+    pipe backend -> critic on done via notify
+    pipe frontend -> critic on done via notify
+
+    # --- Step 5: Critic evaluates against rubric ---
+    session: critic
+      depends_on: [backend, frontend]
+      Read .ralph/rubric.md for the rubric.
+      Read ALL implementation files and the spec.
+      Score every rubric item as PASS or FAIL with evidence.
+      Run both TypeScript compilers and include results.
+      Write scorecard to .ralph/reviews/scorecard.md.
+      max: 3
+
+    # --- Feed scorecard back (file persists for next iteration) ---
+    pipe critic -> architect on done via file .ralph/reviews/scorecard.md

@@ -31,6 +31,7 @@ export type Declaration =
   | SessionBlock
   | ParallelBlock
   | LoopUntilBlock
+  | PipelineBlock
   | PipeDecl
   | IfBlock
   | MapExpr
@@ -94,13 +95,24 @@ export interface ParallelBlock extends Loc {
 }
 
 // ---------------------------------------------------------------------------
-// Loop-until block
+// Pipeline block — a group of declarations that execute as a unit.
+// Can contain sessions, pipes, let bindings, agent decls — anything.
+// Used as the body of `loop until` for multi-agent iteration.
+// ---------------------------------------------------------------------------
+export interface PipelineBlock extends Loc {
+  readonly _tag: "PipelineBlock"
+  readonly declarations: ReadonlyArray<Declaration>
+}
+
+// ---------------------------------------------------------------------------
+// Loop-until block — body is either a single session OR a pipeline of
+// multiple declarations (sessions, pipes, etc.) that re-execute as a unit.
 // ---------------------------------------------------------------------------
 export interface LoopUntilBlock extends Loc {
   readonly _tag: "LoopUntilBlock"
   readonly condition: string
   readonly max?: number
-  readonly body: SessionBlock
+  readonly body: SessionBlock | PipelineBlock
   readonly evaluate?: EvaluateAnnotation
 }
 

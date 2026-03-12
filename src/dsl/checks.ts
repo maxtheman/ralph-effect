@@ -17,6 +17,7 @@ export interface CheckSpec {
 export const builtinCheckSpecs: Record<string, CheckSpec> = {
   "file-exists": { requiredArgs: ["path"] },
   "file-not-empty": { requiredArgs: ["path"] },
+  "file-contains": { requiredArgs: ["path", "pattern"] },
   "json-valid": { requiredArgs: ["path"] },
   "tests-pass": {}
 }
@@ -38,6 +39,17 @@ export const builtinChecks: Record<string, CheckFn> = {
         return stat.size > 0
           ? { done: true, reason: "File is not empty" }
           : { done: false, reason: `File is empty: ${args.path}` }
+      },
+      catch: (error) => new Error(`Check failed: ${error}`)
+    }),
+
+  "file-contains": (args) => (_goal, _output) =>
+    Effect.try({
+      try: () => {
+        const content = fs.readFileSync(args.path, "utf-8")
+        return content.includes(args.pattern)
+          ? { done: true, reason: `File contains "${args.pattern}"` }
+          : { done: false, reason: `File does not contain "${args.pattern}": ${args.path}` }
       },
       catch: (error) => new Error(`Check failed: ${error}`)
     }),
