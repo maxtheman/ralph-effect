@@ -233,6 +233,13 @@ export const ralph = (config: LoopConfig, handles?: LoopHandles) =>
         yield* Console.log(
           `\x1b[90m${tag}\x1b[0m  Context items: ${currentContext.length} (from: ${currentContext.map((c) => c.source).join(", ")})`
         )
+        // Show full context content so you can track what's being passed between agents
+        for (const ctx of currentContext) {
+          const label = ctx.tag ? ` [${ctx.tag}]` : ""
+          yield* Console.log(
+            `\x1b[90m${tag}  ── context from ${ctx.source}${label} ──\x1b[0m\n${ctx.text}\n\x1b[90m${tag}  ── end context ──\x1b[0m`
+          )
+        }
       }
       yield* updateState({ iteration, status: "running", goal: currentGoal, context: currentContext })
 
@@ -242,9 +249,10 @@ export const ralph = (config: LoopConfig, handles?: LoopHandles) =>
         Effect.catchAll((e) => Effect.succeed(`Error: ${e.message}`))
       )
 
-      if (config.verbose) {
-        yield* Console.log(`\x1b[93m[agent]\x1b[0m ${response}`)
-      }
+      // Always show the full agent response (was previously gated on verbose)
+      yield* Console.log(
+        `\n\x1b[93m${tag} ── agent response ──\x1b[0m\n${response}\n\x1b[93m${tag} ── end response ──\x1b[0m`
+      )
       yield* updateState({ lastAgentOutput: response })
 
       // --- Clear context after use (it was delivered to the agent this turn) ---
@@ -252,8 +260,13 @@ export const ralph = (config: LoopConfig, handles?: LoopHandles) =>
       yield* updateState({ context: [] })
 
       // --- Evaluate (uses currentGoal ONLY — evaluator never sees injected context) ---
-      yield* Console.log(`\x1b[96m[eval]\x1b[0m Evaluating...`)
+      yield* Console.log(`\x1b[96m${tag} [eval]\x1b[0m Evaluating iteration ${iteration}...`)
       const result = yield* evaluate(currentGoal, response)
+      yield* Console.log(
+        result.done
+          ? `\x1b[92m${tag} [eval] ✓ DONE\x1b[0m ${result.reason}`
+          : `\x1b[93m${tag} [eval] → CONTINUE\x1b[0m ${result.reason}`
+      )
       yield* updateState({ lastEvalResult: result.reason })
 
       // --- Publish IterationComplete event ---
@@ -266,14 +279,14 @@ export const ralph = (config: LoopConfig, handles?: LoopHandles) =>
       )
 
       if (result.done) {
-        yield* Console.log(`\x1b[92m${tag}\x1b[0m ${result.reason}`)
+        yield* Console.log(`\x1b[92m${tag}\x1b[0m Completed after ${iteration} iteration(s)`)
         yield* updateState({ status: "done" })
         yield* codex.archiveThread(agentThreadId).pipe(Effect.catchAll(() => Effect.void))
         return { iterations: iteration, result: response }
       }
 
       // --- Refine ---
-      yield* Console.log(`\x1b[93m${tag}\x1b[0m Continuing: ${result.reason}`)
+      yield* Console.log(`\x1b[93m${tag}\x1b[0m Refining goal for next iteration...`)
       yield* Ref.set(goalRef, [
         `Original goal: ${config.goal}`,
         `\nPrevious attempt output:\n${response}`,

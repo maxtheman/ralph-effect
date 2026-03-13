@@ -119,7 +119,8 @@ agent critic:
     6. Run `npx tsc --noEmit` to check backend compiles
     7. Run `cd frontend && npx tsc --noEmit` to check frontend compiles
        Include compile results in the scorecard.
-  sandbox: read-only
+  sandbox: workspace-write
+  writableRoots: [.ralph/reviews]
 
 # ============================================================
 # The full build loop: pipeline iterates until rubric complete

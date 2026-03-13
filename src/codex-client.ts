@@ -307,24 +307,46 @@ export const CodexLLMLive: Layer.Layer<CodexLLM, Error> = Layer.effect(
 
     const transport = new CodexTransport(proc)
 
-    // Log agent messages for observability
+    // Log agent messages for observability — full text, no truncation
     // The actual text comes via codex/event/agent_message (not item_completed)
     transport.on("codex/event/agent_message", (params) => {
       const evt = params as unknown as AgentMessageEvent
       if (evt.msg?.message) {
-        const preview = evt.msg.message.slice(0, 120)
-        console.error(`[codex:msg] ${preview}${evt.msg.message.length > 120 ? "..." : ""}`)
+        const threadTag = evt.conversationId ? `[${evt.conversationId.slice(0, 8)}]` : ""
+        const phase = evt.msg.phase ? ` (${evt.msg.phase})` : ""
+        console.error(`\n\x1b[36m[codex:msg]${threadTag}${phase}\x1b[0m\n${evt.msg.message}\n`)
       }
     })
 
-    // Log tool executions for observability
+    // Log tool executions for observability — full output including patches
     transport.on("codex/event/item_completed", (params) => {
       const msg = params.msg as { type: string; item?: Record<string, unknown> } | undefined
       const item = msg?.item
       if (!item) return
       const itemType = (item.type as string)?.toLowerCase() ?? ""
+
       if (itemType === "commandexecution" || itemType === "command_execution") {
-        console.error(`[codex:tool] ${item.command ?? item.input ?? ""}`)
+        const cmd = (item.command ?? item.input ?? "") as string
+        console.error(`\n\x1b[33m[codex:tool]\x1b[0m $ ${cmd}`)
+        // Show command output (stdout/stderr)
+        const output = (item.output ?? item.aggregatedOutput ?? "") as string
+        if (output) {
+          console.error(`\x1b[90m${output}\x1b[0m`)
+        }
+      } else if (itemType === "filewrite" || itemType === "file_write" || itemType === "patch" || itemType === "fileedit" || itemType === "file_edit") {
+        // Show file write / patch operations in full
+        const path = (item.path ?? item.file ?? item.filePath ?? "") as string
+        const content = (item.content ?? item.patch ?? item.diff ?? "") as string
+        console.error(`\n\x1b[35m[codex:patch]\x1b[0m ${path}`)
+        if (content) {
+          console.error(`\x1b[90m${content}\x1b[0m`)
+        }
+      } else {
+        // Log any other item types so nothing is hidden
+        const summary = JSON.stringify(item, null, 2)
+        if (summary.length > 10) {
+          console.error(`\n\x1b[34m[codex:item:${itemType}]\x1b[0m\n\x1b[90m${summary}\x1b[0m`)
+        }
       }
     })
 
@@ -384,6 +406,9 @@ export const CodexLLMLive: Layer.Layer<CodexLLM, Error> = Layer.effect(
           }
           if (config?.reasoningEffort) {
             params.reasoningEffort = config.reasoningEffort
+          }
+          if (config?.writableRoots && config.writableRoots.length > 0) {
+            params.writableRoots = config.writableRoots
           }
           const result = (yield* transport.call("thread/start", params)) as {
             thread: { id: string }
