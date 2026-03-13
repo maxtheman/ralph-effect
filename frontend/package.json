@@ -1,0 +1,22 @@
+{
+  "name": "ralph-effect-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@json-render/core": "^0.13.0",
+    "@json-render/react": "^0.13.0",
+    "@xyflow/react": "latest",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "latest"
+  }
+}

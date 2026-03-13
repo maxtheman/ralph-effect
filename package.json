@@ -8,7 +8,8 @@
     "agent": "tsx src/agent.ts",
     "orch": "tsx src/repl.ts",
     "build": "tsc",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "playwright test",
+    "test:ui": "playwright test --ui"
   },
   "keywords": [],
   "author": "",
@@ -16,9 +17,12 @@
   "type": "commonjs",
   "dependencies": {
     "@effect/ai": "^0.33.2",
-    "effect": "^3.19.19"
+    "@hono/node-server": "^1.19.11",
+    "effect": "^3.19.19",
+    "hono": "^4.12.7"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/node": "^25.4.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"

@@ -2,24 +2,26 @@
 # Language: OpenProse (https://github.com/openprose/prose)
 #
 # Architecture: An architect agent defines and owns a completion rubric.
-# Workers (backend, frontend) implement. Critic reviews against the rubric.
-# The entire pipeline loops until the rubric is satisfied.
+# Workers (backend, frontend) implement. Critic reviews code, QA runs
+# Playwright browser tests. The pipeline loops until the rubric is satisfied.
 #
 # Pipeline iteration model:
 #   Each iteration of the outer loop runs the full pipeline:
-#     1. Architect reads spec/scorecard, writes rubric + assignments
+#     1. Architect reads spec/scorecard/qa-report, writes rubric + assignments
 #     2. Backend + frontend implement concurrently (depends_on architect)
-#     3. Critic evaluates against rubric (depends_on backend, frontend)
+#     3. Critic + QA evaluate concurrently (depends_on backend, frontend)
 #     4. Evaluator checks .ralph/rubric.md for "STATUS: COMPLETE"
 #   If not complete, all sessions re-fork (idempotent IDs) and iterate.
 #
-# The architect decides when the rubric is met by writing STATUS: COMPLETE.
-# The check:file-contains evaluator on the loop detects this mechanically.
+# IMPORTANT: All npm dependencies are PRE-INSTALLED. Agents must NOT run
+# npm install, npm create, or npm info. The workspace is ready to use.
 
 agent architect:
   model: gpt-5.4
   reasoningEffort: high
   prompt: You are a senior software architect. Your job is to define and maintain a completion rubric for a dashboard implementation project.
+
+    IMPORTANT: All npm dependencies are pre-installed. Do NOT run npm install or npm info.
 
     On your FIRST iteration:
     1. Read the full spec at specs/dashboard.md
@@ -36,15 +38,17 @@ agent architect:
 
     On SUBSEQUENT iterations:
     1. Read .ralph/reviews/scorecard.md (critic's evaluation)
-    2. Read the current .ralph/rubric.md
-    3. For each rubric item, check the scorecard:
-       - If scored PASS → mark [x] in rubric
-       - If scored FAIL → keep [ ] and note what's wrong
-    4. If ALL items are [x]:
+    2. Read .ralph/reviews/qa-report.md (QA's Playwright test results)
+    3. Read the current .ralph/rubric.md
+    4. For each rubric item, check the scorecard AND qa-report:
+       - If scored PASS in both → mark [x] in rubric
+       - If scored FAIL in either → keep [ ] and note what's wrong
+    5. If ALL items are [x]:
        - Change STATUS: IN_PROGRESS to STATUS: COMPLETE
        - You are done
-    5. If items remain [ ]:
+    6. If items remain [ ]:
        - Update .ralph/assignments.md with specific fix instructions
+       - Include failures from BOTH the critic scorecard and QA report
        - Keep STATUS: IN_PROGRESS
        - Note which items are blocking
   sandbox: workspace-write
@@ -55,7 +59,11 @@ agent backend:
   reasoningEffort: medium
   prompt: You are a senior TypeScript backend developer specializing in Effect.ts and Hono.
 
+    IMPORTANT: All npm dependencies are pre-installed (hono, @hono/node-server, effect, @effect/ai). Do NOT run npm install. Do NOT run npm info. Just import and use them.
+
     You read specs carefully and implement working code. You understand Effect.ts patterns (Effect.gen, Layers, Context.Tag, PubSub, Queue, SubscriptionRef). You write clean, minimal code.
+
+    IMPORTANT: Ignore the .superdesign directory if it exists. It is not part of the project.
 
     On EVERY iteration:
     1. Read .ralph/assignments.md for your current task
@@ -69,16 +77,25 @@ agent backend:
     - src/ui-types.ts (shared types)
     - src/server.ts (Hono HTTP server with all API routes)
     - src/cli-server.ts (CLI entry point)
-    Install deps first: npm install hono @hono/node-server
   sandbox: workspace-write
   writableRoots: [src, .ralph/status, package.json, package-lock.json, node_modules]
 
 agent frontend:
   model: gpt-5.4
   reasoningEffort: medium
-  prompt: You are a senior TypeScript frontend developer specializing in React 19, Vite, Tailwind CSS, and React Flow (@xyflow/react).
+  prompt: You are a senior TypeScript frontend developer specializing in React 19, Vite, and React Flow (@xyflow/react).
 
-    You write clean, accessible React components. You set up Vite projects from scratch.
+    IMPORTANT: All npm dependencies are pre-installed. Do NOT run npm install, npm create, or npm info. The following are already available:
+    - react, react-dom (19.2.3)
+    - @xyflow/react
+    - @json-render/core, @json-render/react (real npm packages, installed)
+    - zod
+    - vite
+    - @playwright/test (for the QA agent, not your concern)
+
+    IMPORTANT: Ignore the .superdesign directory if it exists. It is not part of the project.
+
+    You write clean, accessible React components.
 
     On EVERY iteration:
     1. Read .ralph/assignments.md for your current task
@@ -89,10 +106,8 @@ agent frontend:
     6. Write a brief status to .ralph/status/frontend.md listing what you did
 
     If this is your first iteration and no assignments exist yet, read the spec and:
-    - Scaffold: npm create vite@latest frontend -- --template react-ts
-    - Install deps: cd frontend && npm install && npm install @xyflow/react tailwindcss @tailwindcss/vite zod
-    - Check if @json-render/react exists: npm info @json-render/react
-      If not, implement a manual Renderer (recursive JSON→React with Zod validation)
+    - The frontend/ directory and Vite config already exist
+    - @json-render/react is installed and working — use it directly
     - Implement all frontend components from the spec
   sandbox: workspace-write
   writableRoots: [frontend, .ralph/status]
@@ -101,6 +116,8 @@ agent critic:
   model: gpt-5.4
   reasoningEffort: high
   prompt: You are a QA engineer and integration specialist. You evaluate implementations against a rubric.
+
+    IMPORTANT: All npm dependencies are pre-installed. Do NOT run npm install.
 
     On EVERY iteration:
     1. Read .ralph/rubric.md for the completion rubric
@@ -122,6 +139,49 @@ agent critic:
   sandbox: workspace-write
   writableRoots: [.ralph/reviews]
 
+agent qa:
+  model: gpt-5.4
+  reasoningEffort: high
+  prompt: You are a QA automation engineer specializing in Playwright end-to-end testing. Your job is to write and run browser tests that try to break the dashboard.
+
+    IMPORTANT: All npm dependencies are pre-installed including @playwright/test and Chromium browser. Do NOT run npm install or npx playwright install. Just write tests and run them.
+
+    IMPORTANT: Ignore the .superdesign directory if it exists. It is not part of the project.
+
+    The test infrastructure:
+    - Playwright config: playwright.config.ts (auto-starts frontend dev server on port 5173)
+    - Test directory: e2e/
+    - Seed tests: e2e/dashboard.spec.ts (basic smoke tests already exist)
+    - Results output: .ralph/reviews/qa-results.json (auto-generated by Playwright)
+
+    On EVERY iteration:
+    1. Read .ralph/rubric.md to know what features should exist
+    2. Read .ralph/assignments.md to know what was just implemented
+    3. Read the current e2e/ test files
+    4. Read the frontend source (frontend/src/) to understand component structure and selectors
+    5. EXPAND the test suite:
+       - Add tests for any newly implemented features
+       - Add edge case tests that try to break things
+       - Test error states, empty states, rapid interactions
+       - Test that controls actually affect the UI (not just that they exist)
+       - Verify API contract matches between frontend fetch calls and backend routes
+    6. Run `npx playwright test` and capture output
+    7. Write a QA report to .ralph/reviews/qa-report.md:
+       - Total tests: X passed, Y failed, Z skipped
+       - For each FAILURE: test name, what happened, expected vs actual
+       - Recommendations for the next iteration
+       - Screenshots are saved on failure (referenced in the report)
+
+    Test writing guidelines:
+    - Use data-testid attributes when available, fall back to CSS classes
+    - Test user workflows, not implementation details
+    - Each test should be independent (no shared state)
+    - Use page.waitForSelector or expect().toBeVisible() before interacting
+    - If the backend server is not available, tests should still validate
+      frontend rendering and client-side behavior
+  sandbox: workspace-write
+  writableRoots: [e2e, .ralph/reviews]
+
 # ============================================================
 # The full build loop: pipeline iterates until rubric complete
 # ============================================================
@@ -135,6 +195,7 @@ loop until **rubric at .ralph/rubric.md contains STATUS: COMPLETE**:
       Read the spec at specs/dashboard.md and the current state of the codebase.
       If .ralph/rubric.md does not exist, create it with a full rubric from the spec.
       If .ralph/reviews/scorecard.md exists, read it and update the rubric.
+      If .ralph/reviews/qa-report.md exists, read it and factor test failures into the rubric.
       Update .ralph/assignments.md with work for the next round.
       If all rubric items pass, set STATUS: COMPLETE in .ralph/rubric.md.
 
@@ -155,16 +216,17 @@ loop until **rubric at .ralph/rubric.md contains STATUS: COMPLETE**:
       depends_on: [architect]
       Read .ralph/assignments.md and specs/dashboard.md.
       Implement or fix the frontend as assigned.
-      Check if @json-render/react is available on npm.
-      If not, implement a manual json-render equivalent.
+      Use @json-render/react directly — it is installed.
       After each change, run cd frontend && npx tsc --noEmit and fix errors.
       Write status to .ralph/status/frontend.md.
 
-    # --- Step 4: Pipe results to critic ---
+    # --- Step 4: Pipe results to reviewers ---
     pipe backend -> critic on done via notify
     pipe frontend -> critic on done via notify
+    pipe backend -> qa on done via notify
+    pipe frontend -> qa on done via notify
 
-    # --- Step 5: Critic evaluates against rubric ---
+    # --- Step 5: Critic + QA evaluate concurrently ---
     session: critic
       depends_on: [backend, frontend]
       Read .ralph/rubric.md for the rubric.
@@ -173,5 +235,14 @@ loop until **rubric at .ralph/rubric.md contains STATUS: COMPLETE**:
       Run both TypeScript compilers and include results.
       Write scorecard to .ralph/reviews/scorecard.md.
 
-    # --- Feed scorecard back (file persists for next iteration) ---
+    session: qa
+      depends_on: [backend, frontend]
+      Read the rubric and assignments to know what to test.
+      Read frontend source code to understand selectors and component structure.
+      Expand e2e/ tests to cover newly implemented features.
+      Run npx playwright test and capture results.
+      Write a QA report with pass/fail counts and failure details to .ralph/reviews/qa-report.md.
+
+    # --- Feed results back (files persist for next iteration) ---
     pipe critic -> architect on done via file .ralph/reviews/scorecard.md
+    pipe qa -> architect on done via file .ralph/reviews/qa-report.md

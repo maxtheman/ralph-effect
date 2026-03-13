@@ -8,3 +8,7 @@ dist/
 # Generated workflow outputs
 examples/hello-world-output.md
 examples/poem-final.md
+
+# Agent working directories (not source of truth)
+.superdesign/
+.ralph/
