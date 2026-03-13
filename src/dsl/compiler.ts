@@ -434,7 +434,7 @@ const buildLoopConfig = (
   return {
     id: sessionIdOf(session),
     goal: interpolate(session.goal, session.line, state),
-    maxIterations: overrides?.maxIterations ?? session.max ?? 10,
+    maxIterations: overrides?.maxIterations ?? session.max ?? Infinity,
     verbose: true,
     agent: resolveAgentConfig(session.agent, session.line, state),
     evaluator: overrides?.evaluator ?? safeResolveEvaluator(annotation, session.line, state)
@@ -527,7 +527,7 @@ const compileLoopUntil = (
     mergeErrors(state, pipelineState)
 
     const sessionIds = collectPipelineSessionIds(loop.body.declarations)
-    const max = loop.max ?? 10
+    const max = loop.max ?? Infinity
 
     return Effect.gen(function* () {
       const orch = yield* Orchestrator
@@ -612,7 +612,7 @@ const compileMap = (
   const configs = goals.map<LoopConfig>((goal, index) => ({
     id: ids[index],
     goal,
-    maxIterations: 10,
+    maxIterations: Infinity,
     verbose: true,
     agent: agentConfig
   }))
@@ -670,7 +670,7 @@ const compileReduce = (
   const reducer: LoopConfig = {
     id: reducerId,
     goal,
-    maxIterations: 10,
+    maxIterations: Infinity,
     verbose: true,
     agent: agentConfig
   }

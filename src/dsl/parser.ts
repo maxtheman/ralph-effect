@@ -144,17 +144,10 @@ const preprocess = (source: string): {
       return
     }
     const leadingSpaces = rawLine.match(/^ */)?.[0].length ?? 0
-    if (leadingSpaces % 2 !== 0) {
-      errors.push({
-        line: lineNumber,
-        message: "Indentation must be in multiples of 2 spaces"
-      })
-      return
-    }
 
     lines.push({
       line: lineNumber,
-      indent: leadingSpaces / 2,
+      indent: Math.floor(leadingSpaces / 2),
       text: rawLine.slice(leadingSpaces).trimEnd()
     })
   })
@@ -294,7 +287,22 @@ class Parser {
           this.addError(next.line, `Invalid reasoningEffort value: ${val} (must be low, medium, or high)`)
         }
       } else if (next.text.startsWith("prompt:")) {
-        prompt = next.text.slice("prompt:".length).trim()
+        const firstLine = next.text.slice("prompt:".length).trim()
+        const promptLines: string[] = firstLine ? [firstLine] : []
+        this.advance()
+
+        // Consume continuation lines indented deeper than the property level
+        while (true) {
+          const cont = this.current()
+          if (!cont || cont.indent <= indent + 1) break
+          const relativeIndent = cont.indent - (indent + 2)
+          const prefix = "  ".repeat(Math.max(0, relativeIndent))
+          promptLines.push(prefix + cont.text)
+          this.advance()
+        }
+
+        prompt = promptLines.join("\n")
+        continue // skip the this.advance() at bottom — already advanced
       } else if (next.text.startsWith("sandbox:")) {
         const sandboxValue = next.text.slice("sandbox:".length).trim()
         if (sandboxValue === "read-only" || sandboxValue === "workspace-write") {

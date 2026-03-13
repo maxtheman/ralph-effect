@@ -125,7 +125,7 @@ agent critic:
 # The full build loop: pipeline iterates until rubric complete
 # ============================================================
 
-loop until **rubric at .ralph/rubric.md contains STATUS: COMPLETE** (max: 8):
+loop until **rubric at .ralph/rubric.md contains STATUS: COMPLETE**:
   evaluate: check:file-contains args: {path: .ralph/rubric.md, pattern: "STATUS: COMPLETE"}
   pipeline:
 
@@ -136,7 +136,6 @@ loop until **rubric at .ralph/rubric.md contains STATUS: COMPLETE** (max: 8):
       If .ralph/reviews/scorecard.md exists, read it and update the rubric.
       Update .ralph/assignments.md with work for the next round.
       If all rubric items pass, set STATUS: COMPLETE in .ralph/rubric.md.
-      max: 2
 
     # --- Step 2: Pipe assignments to workers ---
     pipe architect -> backend on done via file .ralph/assignments.md
@@ -149,7 +148,6 @@ loop until **rubric at .ralph/rubric.md contains STATUS: COMPLETE** (max: 8):
       Implement or fix the backend as assigned.
       After each change, run npx tsc --noEmit and fix errors.
       Write status to .ralph/status/backend.md.
-      max: 5
       evaluate: check:tests-pass args: {command: "npx tsc --noEmit"}
 
     session: frontend
@@ -160,7 +158,6 @@ loop until **rubric at .ralph/rubric.md contains STATUS: COMPLETE** (max: 8):
       If not, implement a manual json-render equivalent.
       After each change, run cd frontend && npx tsc --noEmit and fix errors.
       Write status to .ralph/status/frontend.md.
-      max: 5
 
     # --- Step 4: Pipe results to critic ---
     pipe backend -> critic on done via notify
@@ -174,7 +171,6 @@ loop until **rubric at .ralph/rubric.md contains STATUS: COMPLETE** (max: 8):
       Score every rubric item as PASS or FAIL with evidence.
       Run both TypeScript compilers and include results.
       Write scorecard to .ralph/reviews/scorecard.md.
-      max: 3
 
     # --- Feed scorecard back (file persists for next iteration) ---
     pipe critic -> architect on done via file .ralph/reviews/scorecard.md
